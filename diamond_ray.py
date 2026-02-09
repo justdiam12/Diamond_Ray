@@ -274,9 +274,7 @@ class Diamond_Ray():
                 constrained_layout=True
             )
 
-            # =============================
-            # Ray Paths (Top)
-            # =============================
+            # Ray Paths
             for angle in self.angles:
                 r, z, _ = self.propagate_ray(
                     angle,
@@ -293,9 +291,7 @@ class Diamond_Ray():
             ax_ray.invert_yaxis()
             ax_ray.grid()
 
-            # =============================
-            # SSP (Bottom)
-            # =============================
+            # SSP
             ssp_plot = np.copy(self.ssp)
 
             # Ensure (depth, range)
@@ -333,9 +329,7 @@ class Diamond_Ray():
             ax_ssp.set_title('Sound Speed Profile')
             ax_ssp.grid()
 
-            # =============================
-            # Colorbar (ONLY next to SSP)
-            # =============================
+            # Colorbar
             cbar = fig.colorbar(im, ax=ax_ssp, location='right')
             cbar.set_label('c (m/s)')
 
