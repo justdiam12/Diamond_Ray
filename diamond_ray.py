@@ -67,7 +67,7 @@ class Diamond_Ray():
             # Ensure shape = (Nr, Nz)
             if self.ssp.shape == (len(self.ssp_depths), len(self.ssp_ranges)):
                 self.ssp = self.ssp.T
-
+                
             self.c_interp = RegularGridInterpolator(
                 (self.ssp_ranges, self.ssp_depths),
                 self.ssp,
