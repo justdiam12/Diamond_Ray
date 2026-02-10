@@ -196,12 +196,6 @@ class Diamond_Ray():
 
 
     def propagate_ray(self, theta0_deg, dr=10.0, r_max=100e3):
-        """
-        Propagate a ray and track complex amplitude including:
-        - Absorption
-        - Reflection losses
-        - Spherical spreading (3D point source)
-        """
 
         r = self.bty_ranges[0] if self.bty_ranges is not None else 0.0
         z = self.source_depth
@@ -236,26 +230,20 @@ class Diamond_Ray():
             # Path length increment
             ds = dr / np.cos(theta)
 
-            # ---------------------------------
-            # Water attenuation (dB/m → Nepers)
-            # ---------------------------------
+            # Water Absorption
             alpha_db = self.water_atten * (self.freq / 1000.0)  # dB/m
             alpha_np = alpha_db / 8.686  # nepers/m
 
             amp *= np.exp(-alpha_np * ds)
 
-            # ---------------------------------
-            # Spherical spreading (A ∝ 1/r)
-            # ---------------------------------
+            # Spherical Spreading
             if r > 0.0:
                 amp *= (r / r_new)
             else:
                 # avoid singularity at source
                 amp *= 1.0
 
-            # ---------------------------------
-            # Surface reflection
-            # ---------------------------------
+            # Surface Reflection
             if z_new <= self.z_surface:
 
                 theta_i = theta
@@ -265,9 +253,7 @@ class Diamond_Ray():
                 z_new = -z_new
                 theta_new = -theta_new
 
-            # ---------------------------------
-            # Bottom reflection
-            # ---------------------------------
+            # Bottom Reflection
             elif self.bty_interp is not None:
 
                 z_b = self.bty_interp(r_new)
