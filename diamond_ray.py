@@ -4,32 +4,50 @@ from matplotlib import pyplot as plt
 from pyproj import Geod
 from scipy.io import loadmat
 from scipy.interpolate import interp1d, RegularGridInterpolator
+from scipy.io import savemat
 
 
 class Diamond_Ray():
     def __init__(self, 
                  ssp_file, 
+                 freq,
                  angle_min,
                  angle_max,
                  source_depth,
+                 bottom_prop,
+                 surface_prop,
+                 water_prop,
                  lon_start,
                  lon_end,
                  lat_start,
                  lat_end,
                  num_points,
                  bty_file, 
-                 ati_file):
+                 ati_file,
+                 save_dir):
 
         self.ssp_file = ssp_file
         self.bty_file = bty_file
         self.ati_file = ati_file
+        self.save_dir = save_dir
 
         # Read data
         self.ssp, self.ssp_depths, self.ssp_ranges = self.read_ssp()
 
+        self.freq = freq
         self.angle_min = angle_min
         self.angle_max = angle_max
         self.source_depth = source_depth
+
+        # Bottom, Surface, and Water Properties
+        self.bottom_density = bottom_prop[0] # kg/m^3
+        self.bottom_ss = bottom_prop[1]      # m/s
+        self.bottom_atten = bottom_prop[2]   # 
+        self.surface_density = surface_prop[0] # kg/m^3
+        self.surface_ss = surface_prop[1]      # m/s
+        self.surface_atten = surface_prop[2]   #
+        self.water_density = water_prop[0] # kg/m^3
+        self.water_atten = water_prop[1]   # dB/m kHz
 
         self.lon_start, self.lon_end = lon_start, lon_end
         self.lat_start, self.lat_end = lat_start, lat_end
@@ -67,7 +85,7 @@ class Diamond_Ray():
             # Ensure shape = (Nr, Nz)
             if self.ssp.shape == (len(self.ssp_depths), len(self.ssp_ranges)):
                 self.ssp = self.ssp.T
-                
+
             self.c_interp = RegularGridInterpolator(
                 (self.ssp_ranges, self.ssp_depths),
                 self.ssp,
@@ -177,16 +195,24 @@ class Diamond_Ray():
             return self.dc_dz_interp(z)
 
 
-    # Ray Propagation Function
     def propagate_ray(self, theta0_deg, dr=10.0, r_max=100e3):
+        """
+        Propagate a ray and track complex amplitude including:
+        - Absorption
+        - Reflection losses
+        - Spherical spreading (3D point source)
+        """
 
-        r = 0.0
+        r = self.bty_ranges[0] if self.bty_ranges is not None else 0.0
         z = self.source_depth
         theta = np.deg2rad(theta0_deg)
+
+        amp = 1 + 0j  # complex amplitude
 
         r_hist = [r]
         z_hist = [z]
         theta_hist = [theta]
+        amp_hist = [amp]
 
         while r < r_max:
 
@@ -195,37 +221,121 @@ class Diamond_Ray():
             c = self.c(z, r)
             dc_dz = self.dc_dz(z, r)
 
+            if c is None:
+                break
+
+            # Ray equations
             dz_dr = np.tan(theta)
             dtheta_dr = -(1.0 / c) * dc_dz / np.cos(theta)
 
-            r += dr
-            z += dz_dr * dr
-            theta += dtheta_dr * dr
+            # Step forward
+            r_new = r + dr
+            z_new = z + dz_dr * dr
+            theta_new = theta + dtheta_dr * dr
 
+            # Path length increment
+            ds = dr / np.cos(theta)
+
+            # ---------------------------------
+            # Water attenuation (dB/m → Nepers)
+            # ---------------------------------
+            alpha_db = self.water_atten * (self.freq / 1000.0)  # dB/m
+            alpha_np = alpha_db / 8.686  # nepers/m
+
+            amp *= np.exp(-alpha_np * ds)
+
+            # ---------------------------------
+            # Spherical spreading (A ∝ 1/r)
+            # ---------------------------------
+            if r > 0.0:
+                amp *= (r / r_new)
+            else:
+                # avoid singularity at source
+                amp *= 1.0
+
+            # ---------------------------------
             # Surface reflection
-            if z <= self.z_surface:
-                z = -z
-                theta = -theta
+            # ---------------------------------
+            if z_new <= self.z_surface:
 
+                theta_i = theta
+                R = self.reflection_coefficient(theta_i, z, r, medium='surface')
+                amp *= R
+
+                z_new = -z_new
+                theta_new = -theta_new
+
+            # ---------------------------------
             # Bottom reflection
+            # ---------------------------------
             elif self.bty_interp is not None:
-                z_b = self.bty_interp(r)
-                if z >= z_b:
-                    z = z_b - (z - z_b)
-                    phi = np.arctan(self.dbty_dr_interp(r))
-                    theta = 2 * phi - theta
 
-            elif z >= self.z_bottom:
+                z_b = self.bty_interp(r_new)
+
+                if z_new >= z_b:
+
+                    slope = self.dbty_dr_interp(r_new)
+                    phi = np.arctan(slope)
+
+                    theta_rel = theta - phi
+                    R = self.reflection_coefficient(theta_rel, z, r, medium='bottom')
+
+                    amp *= R
+
+                    z_new = z_b - (z_new - z_b)
+                    theta_new = 2 * phi - theta_new
+
+            elif z_new >= self.z_bottom:
                 break
+
+            # Update state
+            r = r_new
+            z = z_new
+            theta = theta_new
 
             r_hist.append(r)
             z_hist.append(z)
             theta_hist.append(theta)
+            amp_hist.append(amp)
 
-        return np.array(r_hist), np.array(z_hist), np.array(theta_hist)
+        return (
+            np.array(r_hist),
+            np.array(z_hist),
+            np.array(theta_hist),
+            np.array(amp_hist)
+        )
+    
+
+    def reflection_coefficient(self, theta_i, z, r, medium='bottom'):
+
+        # Water properties (use user-specified density + local c)
+        rho1 = self.water_density
+        c1 = self.c(z, r)
+
+        if medium == 'bottom':
+            rho2 = self.bottom_density
+            c2 = self.bottom_ss
+        else:
+            rho2 = self.surface_density
+            c2 = self.surface_ss
+
+        Z1 = rho1 * c1
+        Z2 = rho2 * c2
+
+        sin_theta_t = (c2 / c1) * np.sin(theta_i)
+
+        # Allow complex transmission angle (critical angle physics)
+        cos_theta_t = np.sqrt(1 - sin_theta_t**2 + 0j)
+
+        R = (Z2 * np.cos(theta_i) - Z1 * cos_theta_t) / \
+            (Z2 * np.cos(theta_i) + Z1 * cos_theta_t)
+
+        return R
+
 
     # Plot Rays and SSP
-    def plot_rays(self):
+    def run(self):
+        ray_data = {}
 
         # Filter for Range Independent SSP
         if self.ssp.ndim == 1 or self.ssp.shape[1] == 1:
@@ -246,11 +356,22 @@ class Diamond_Ray():
             ax_ssp.grid()
 
             for angle in self.angles:
-                r, z, _ = self.propagate_ray(
+                print(f"Propagating ray at {angle}°")
+
+                r, z, theta, amp = self.propagate_ray(
                     angle,
                     r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
                 )
-                ax_ray.plot(r / 1000, z, label=f'{angle}°')
+
+                # Store ray results
+                ray_data[f"ray_{angle}deg"] = {
+                    "r": r,
+                    "z": z,
+                    "theta": theta,
+                    "amp": amp
+                }
+
+                ax_ray.plot(r / 1000, z)
 
             # Plot bathymetry
             if self.bty_ranges is not None:
@@ -262,7 +383,7 @@ class Diamond_Ray():
             ax_ray.legend(loc='upper right', fontsize=8)
 
             plt.tight_layout()
-            plt.show()
+            plt.savefig(os.path.join(self.save_dir, 'ray_paths.png'))
 
         # Range-Dependent SSP
         else:
@@ -276,10 +397,21 @@ class Diamond_Ray():
 
             # Ray Paths
             for angle in self.angles:
-                r, z, _ = self.propagate_ray(
+                print(f"Propagating ray at {angle}°")
+
+                r, z, theta, amp = self.propagate_ray(
                     angle,
                     r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
                 )
+
+                # Store ray results
+                ray_data[f"ray_{angle}deg"] = {
+                    "r": r,
+                    "z": z,
+                    "theta": theta,
+                    "amp": amp
+                }
+
                 ax_ray.plot(r / 1000, z)
 
             # Bathymetry
@@ -332,9 +464,18 @@ class Diamond_Ray():
             # Colorbar
             cbar = fig.colorbar(im, ax=ax_ssp, location='right')
             cbar.set_label('c (m/s)')
+            plt.savefig(os.path.join(self.save_dir, 'ray_paths.png'))
 
-            plt.show()
+        output_file = os.path.join(self.save_dir, "ray.mat")
 
+        savemat(output_file, {
+            "frequency": self.freq,
+            "angles_deg": self.angles,
+            "source_depth": self.source_depth,
+            "ray_data": ray_data
+        })
+
+        print(f"Ray data saved to {output_file}")
 
 
 if __name__ == "__main__":
@@ -342,23 +483,32 @@ if __name__ == "__main__":
     ssp_file = os.path.join(data_dir, 'ssp.mat')
     bty_file = os.path.join(data_dir, 'bty.mat')
     ati_file = os.path.join(data_dir, 'ati.mat')
+    freq = 3500 # Hz
     angle_min, angle_max = -10, 10
     source_depth = 33
+    water_prop = (1026, 0.1)  # density (kg/m^3), attenuation (dB/m kHz)
+    bottom_prop = (2000, 1500, 0.5)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
+    surface_prop = (1000, 350, 0.1) # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
     lon_start, lon_end = -122.8, -122.85
     lat_start, lat_end = 47.78, 47.71
     num_points = 1000
 
     # Run Ray Tracing
-    ray = Diamond_Ray(ssp_file, 
+    ray = Diamond_Ray(ssp_file=ssp_file, 
+                      freq=freq,
                       angle_min=angle_min, 
                       angle_max=angle_max, 
-                      source_depth=33,
+                      source_depth=33, 
+                      bottom_prop=bottom_prop,
+                      surface_prop=surface_prop,
+                      water_prop=water_prop,
                       lon_start=lon_start,
                       lon_end=lon_end,
                       lat_start=lat_start,
                       lat_end=lat_end,
                       num_points=num_points,
                       bty_file=bty_file, 
-                      ati_file=ati_file)
+                      ati_file=ati_file,
+                      save_dir=data_dir)
     
-    ray.plot_rays()
+    ray.run()
