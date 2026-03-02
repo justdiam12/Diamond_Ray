@@ -211,6 +211,8 @@ class Diamond_Ray_Code():
         z_hist = [z]
         theta_hist = [np.rad2deg(theta)]
         time_hist = [travel_time]
+        R_hist = []
+        R_coeff_hist = []
 
         while r < r_max:
 
@@ -245,6 +247,12 @@ class Diamond_Ray_Code():
                 travel_time += ds / c    
                 theta_new = -theta
 
+                # Refelction Coefficient
+                theta_rel = theta
+                R = self.reflection_coefficient(theta_rel, z, r, 'surface')
+                R_hist.append('T')
+                R_coeff_hist.append(R)
+
             # Bottom reflection 
             elif self.bty_interp is not None:
                 z_b = self.bty_interp(r_new)
@@ -261,6 +269,12 @@ class Diamond_Ray_Code():
                     slope = self.dbty_dr_interp(r_new)
                     phi = np.arctan(slope)
                     theta_new = 2 * phi - theta
+
+                    # Refelction Coefficient
+                    theta_rel = theta - phi
+                    R = self.reflection_coefficient(theta_rel, z, r, 'bottom')
+                    R_hist.append('B')
+                    R_coeff_hist.append(R)
 
             r = r_new
             z = z_new
@@ -306,6 +320,10 @@ class Diamond_Ray_Code():
             (Z2 * np.cos(theta_i) + Z1 * cos_theta_t)
 
         return R
+    
+
+    def eigenrays(self, depth):
+        return 0
 
 
     # Plot Rays and SSP
