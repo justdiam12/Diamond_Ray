@@ -14,6 +14,7 @@ class Diamond_Ray_Code():
                  source_level,
                  angle_min,
                  angle_max,
+                 angle_precision,
                  source_depth,
                  bottom_prop,
                  surface_prop,
@@ -39,6 +40,7 @@ class Diamond_Ray_Code():
         self.source_level = source_level
         self.angle_min = angle_min
         self.angle_max = angle_max
+        self.angle_precision = angle_precision
         self.source_depth = source_depth
 
         # Bottom, Surface, and Water Properties
@@ -78,14 +80,6 @@ class Diamond_Ray_Code():
                 fill_value="extrapolate"
             )
 
-            d2c_dz2 = np.gradient(dc_dz, self.ssp_depths)
-            self.d2c_dz2_interp = interp1d(
-                self.ssp_depths,
-                d2c_dz2,
-                bounds_error=False,
-                fill_value="extrapolate"
-            )
-
             self.z_bottom = self.ssp_depths.max()
 
         else:
@@ -107,14 +101,6 @@ class Diamond_Ray_Code():
             self.dc_dz_interp = RegularGridInterpolator(
                 (self.ssp_ranges, self.ssp_depths),
                 dc_dz,
-                bounds_error=False,
-                fill_value=None
-            )
-
-            d2c_dz2 = np.gradient(dc_dz, self.ssp_depths, axis=1)
-            self.d2c_dz2_interp = RegularGridInterpolator(
-                (self.ssp_ranges, self.ssp_depths),
-                d2c_dz2,
                 bounds_error=False,
                 fill_value=None
             )
@@ -211,39 +197,19 @@ class Diamond_Ray_Code():
             return self.dc_dz_interp((r, z))
         else:
             return self.dc_dz_interp(z)
-        
-
-    def d2c_dz2(self, z, r):
-        if self.range_dependent_ssp:
-            return self.d2c_dz2_interp((r, z))
-        else:
-            return self.d2c_dz2_interp(z)
 
 
     def propagate_ray(self, theta0_deg, dr=5.0, r_max=100e3):
-
+        
         r = 0.0
         z = self.source_depth
         theta = np.deg2rad(theta0_deg)
-
-        # Complex amplitude
-        amp = 1.0 + 0j
-        phase = 0.0
         travel_time = 0.0
 
-        # Dynamic ray variables
-        q = 1e-6        # initial geometric spreading
-        p = 0.0
-
-        # Convert attenuation
-        f_khz = self.freq / 1000.0
-        alpha_db = self.water_atten * f_khz
-        alpha_np = alpha_db / 8.686
-
+        # Range, Depth, and Travel Time History
         r_hist = [r]
         z_hist = [z]
-        amp_hist = [amp]
-        phase_hist = [phase]
+        theta_hist = [np.rad2deg(theta)]
         time_hist = [travel_time]
 
         while r < r_max:
@@ -252,97 +218,71 @@ class Diamond_Ray_Code():
 
             c = self.c(z, r)
             dc_dz = self.dc_dz(z, r)
-            d2c_dz2 = self.d2c_dz2(z, r)
 
             if c is None:
                 break
 
-            # ---- Ray equations ----
+            # Ray equations
             dz_dr = np.tan(theta)
             dtheta_dr = -(1.0 / c) * dc_dz / np.cos(theta)
 
-            # ---- Dynamic ray equations ----
-            dq_dr = p
-            dp_dr = -(1.0 / c) * d2c_dz2 * q / (np.cos(theta)**2)
-
-            # ---- Step forward ----
+            # Step forward
             r_new = r + dr
             z_new = z + dz_dr * dr
             theta_new = theta + dtheta_dr * dr
-            q_new = q + dq_dr * dr
-            p_new = p + dp_dr * dr
 
+            # Along Track Distance and Travel Time
             ds = dr / np.cos(theta)
-
-            # ---- Travel time ----
             travel_time += ds / c
 
-            # ---- Phase ----
-            k = 2.0 * np.pi * self.freq / c
-            phase += k * ds
+            # Surface reflection
+            if z_new <= self.z_surface and dz_dr < 0:
+                dr_hit = (self.z_surface - z) / dz_dr
+                r_new = r + dr_hit
+                z_new = self.z_surface + 1e-6
+                ds = dr_hit / np.cos(theta)
+                travel_time -= (dr / np.cos(theta)) / c
+                travel_time += ds / c    
+                theta_new = -theta
 
-            # ---- Geometric spreading amplitude ----
-            if np.abs(q_new) > 1e-12:
-                amp_geom = 1.0 / np.sqrt(np.abs(q_new))
-            else:
-                amp_geom = 0.0
-
-            # ---- Attenuation ----
-            amp_att = np.exp(-alpha_np * ds)
-
-            amp = amp_geom * amp_att * np.exp(1j * phase)
-
-            # ---- Surface reflection ----
-            if z_new <= self.z_surface:
-
-                R = self.reflection_coefficient(theta, z, r, 'surface')
-                amp *= R
-
-                z_new = -z_new
-                theta_new = -theta_new
-
-            # ---- Bottom reflection ----
+            # Bottom reflection 
             elif self.bty_interp is not None:
-
                 z_b = self.bty_interp(r_new)
 
-                if z_new >= z_b:
+                if z_new >= z_b and dz_dr > 0:
+                    dr_hit = (z_b - z) / dz_dr
+                    r_new = r + dr_hit
+                    z_new = z_b - 1e-6
+                    travel_time -= (dr / np.cos(theta)) / c
+                    ds = dr_hit / np.cos(theta)
+                    travel_time += ds / c
 
+                    # Reflection
                     slope = self.dbty_dr_interp(r_new)
                     phi = np.arctan(slope)
-
-                    theta_rel = theta - phi
-                    R = self.reflection_coefficient(theta_rel, z, r, 'bottom')
-                    amp *= R
-
-                    z_new = z_b - (z_new - z_b)
-                    theta_new = 2 * phi - theta_new
+                    theta_new = 2 * phi - theta
 
             r = r_new
             z = z_new
             theta = theta_new
-            q = q_new
-            p = p_new
+            # print(f"Range: {r}, Depth: {z}")
 
             r_hist.append(r)
             z_hist.append(z)
-            amp_hist.append(amp)
-            phase_hist.append(phase)
+            theta_hist.append(np.rad2deg(theta))
             time_hist.append(travel_time)
-
-        pressure = np.array(amp_hist)
 
         return (
             np.array(r_hist),
             np.array(z_hist),
-            pressure,
+            np.array(theta_hist),
             np.array(time_hist)
         )
     
 
     def reflection_coefficient(self, theta_i, z, r, medium='bottom'):
 
-        # Water properties (use user-specified density + local c)
+        # Local Seawater Properties
         rho1 = self.water_density
         c1 = self.c(z, r)
 
@@ -356,6 +296,7 @@ class Diamond_Ray_Code():
         Z1 = rho1 * c1
         Z2 = rho2 * c2
 
+        # Snell's Law
         sin_theta_t = (c2 / c1) * np.sin(theta_i)
 
         # Allow complex transmission angle (critical angle physics)
@@ -392,7 +333,7 @@ class Diamond_Ray_Code():
             for angle in self.angles:
                 print(f"Propagating ray at {angle}°")
 
-                r, z, theta, amp = self.propagate_ray(
+                r, z, theta, time = self.propagate_ray(
                     angle,
                     r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
                 )
@@ -402,7 +343,7 @@ class Diamond_Ray_Code():
                     "r": r,
                     "z": z,
                     "theta": theta,
-                    "amp": amp
+                    "time": time
                 }
 
                 ax_ray.plot(r / 1000, z)
@@ -433,7 +374,7 @@ class Diamond_Ray_Code():
             for angle in self.angles:
                 print(f"Propagating ray at {angle}°")
 
-                r, z, theta, amp = self.propagate_ray(
+                r, z, theta, time = self.propagate_ray(
                     angle,
                     r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
                 )
@@ -443,7 +384,7 @@ class Diamond_Ray_Code():
                     "r": r,
                     "z": z,
                     "theta": theta,
-                    "amp": amp
+                    "time": time
                 }
 
                 ax_ray.plot(r / 1000, z)
@@ -498,7 +439,7 @@ class Diamond_Ray_Code():
             # Colorbar
             cbar = fig.colorbar(im, ax=ax_ssp, location='right')
             cbar.set_label('c (m/s)')
-            plt.savefig(os.path.join(self.save_dir, 'ray_paths.png'))
+            plt.savefig(os.path.join(self.save_dir, 'ray_paths.png'), Resolution=300)
 
         output_file = os.path.join(self.save_dir, "ray.mat")
 
@@ -520,10 +461,11 @@ if __name__ == "__main__":
     source_level = 195 # dB re 1 μPa @ 1 m
     freq = 3500 # Hz
     angle_min, angle_max = -10, 10
+    angle_precision = 1
     source_depth = 33
     water_prop = (1026, 0.1)  # density (kg/m^3), attenuation (dB/m kHz)
-    bottom_prop = (2000, 1500, 0.5)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
-    surface_prop = (1000, 350, 0.1) # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
+    bottom_prop = (2000, 3000, 0.5)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
+    surface_prop = (200, 350, 0.1) # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
     lon_start, lon_end = -122.8, -122.85
     lat_start, lat_end = 47.78, 47.71
     num_points = 1000
@@ -534,7 +476,8 @@ if __name__ == "__main__":
                            source_level=source_level,
                            angle_min=angle_min, 
                            angle_max=angle_max, 
-                           source_depth=33, 
+                           angle_precision=angle_precision,
+                           source_depth=source_depth, 
                            bottom_prop=bottom_prop,
                            surface_prop=surface_prop,
                            water_prop=water_prop,

@@ -10,32 +10,40 @@ from scipy.interpolate import interp1d, RegularGridInterpolator
 
 class Diamond_ARL():
     def __init__(self, 
-                 ssp_file, 
-                 freq,
-                 source_level,
-                 angle_min,
-                 angle_max,
-                 source_depth,
-                 receiver_depth,
-                 bottom_prop,
-                 surface_prop,
-                 water_prop,
-                 lon_start,
-                 lon_end,
-                 lat_start,
-                 lat_end,
-                 num_points,
-                 bty_file, 
-                 ati_file,
-                 save_dir):
+                 ssp_file=None, 
+                 freq=None,
+                 source_level=None,
+                 angle_min=None,
+                 angle_max=None,
+                 source_depth=None,
+                 receiver_depth=None,
+                 bottom_prop=None,
+                 surface_prop=None,
+                 water_prop=None,
+                 lon_start=None,
+                 lon_end=None,
+                 lat_start=None,
+                 lat_end=None,
+                 num_points=None,
+                 num_beams=None,
+                 range_points=None,
+                 depth_points=None,
+                 bty_file=None, 
+                 ati_file=None,
+                 save_dir=None):
         
-        self.ssp_file = ssp_file
-        self.bty_file = bty_file
-        self.ati_file = ati_file
-        self.save_dir = save_dir
+        if ssp_file is not None:
+            self.ssp_file = ssp_file
+        if bty_file is not None:    
+            self.bty_file = bty_file
+        if ati_file is not None:
+            self.ati_file = ati_file
+        if save_dir is not None:
+            self.save_dir = save_dir
 
         # Read data
-        self.ssp = self.read_ssp()
+        if ssp_file is not None:
+            self.ssp = self.read_ssp()
 
         self.freq = freq
         self.source_level = source_level
@@ -45,21 +53,29 @@ class Diamond_ARL():
         self.receiver_depth = receiver_depth
 
         # Bottom, Surface, and Water Properties
-        self.bottom_density = bottom_prop[0] # kg/m^3
-        self.bottom_ss = bottom_prop[1]      # m/s
-        self.bottom_atten = bottom_prop[2]   # 
-        self.surface_density = surface_prop[0] # kg/m^3
-        self.surface_ss = surface_prop[1]      # m/s
-        self.surface_atten = surface_prop[2]   # 
-        self.water_density = water_prop[0] # kg/m^3
-        self.water_atten = water_prop[1]   # dB/m kHz
+        if bottom_prop is not None:
+            self.bottom_density = bottom_prop[0] # kg/m^3
+            self.bottom_ss = bottom_prop[1]      # m/s
+            self.bottom_atten = bottom_prop[2]   # 
+        if surface_prop is not None:
+            self.surface_density = surface_prop[0] # kg/m^3
+            self.surface_ss = surface_prop[1]      # m/s
+            self.surface_atten = surface_prop[2]   # 
+        if water_prop is not None:
+            self.water_density = water_prop[0] # kg/m^3
+            self.water_atten = water_prop[1]   # dB/m kHz
 
         self.lon_start, self.lon_end = lon_start, lon_end
         self.lat_start, self.lat_end = lat_start, lat_end
         self.num_points = num_points
+        self.num_beams = num_beams
+        self.range_points = range_points
+        self.depth_points = depth_points
 
-        self.bty, self.max_range, self.max_depth = self.read_bty()
-        self.angles = np.arange(self.angle_min, self.angle_max + 1, 1)
+        if bty_file is not None:
+            self.bty, self.max_range, self.max_depth = self.read_bty()
+        if self.angle_min is not None and self.angle_max is not None:
+            self.angles = np.arange(self.angle_min, self.angle_max + 1, 1)
 
     def read_ssp(self):
         ssp_data = loadmat(self.ssp_file)
@@ -67,21 +83,29 @@ class Diamond_ARL():
         ssp = ssp_data['ssp']
         ssp_depths = ssp_data['ssp_depths'].flatten()
 
+        # -------------------------
+        # Single profile
+        # -------------------------
         if ssp.ndim == 1 or ssp.shape[0] == 1:
-            ssp = ssp.flatten()
-            ssp_ranges = [0]
-            ssp_export = []
-        else:
-            ssp_ranges = ssp_data['ssp_ranges'].flatten() * 1000.0  # km → m
-            ssp_export = []
+            ssp = np.atleast_1d(ssp).flatten()
+            return [[ssp_depths[i], ssp[i]] for i in range(len(ssp))]
 
-        if len(ssp_ranges) == 1:
-            for i in range(len(ssp)):
-                ssp_export.append([ssp_depths[i], ssp[i]])
-        else:
-            print("Not setup for range-dependent SSP yet")
+        # -------------------------
+        # Along-track profile
+        # -------------------------
+        ssp_ranges = ssp_data['ssp_ranges'].flatten() 
 
-        return ssp_export
+        # Ensure orientation = (depths, ranges)
+        if ssp.shape[0] != len(ssp_depths):
+            ssp = ssp.T
+
+        ssp_df = pd.DataFrame(
+            ssp,
+            index=ssp_depths,
+            columns=ssp_ranges
+        )
+
+        return ssp_df
     
     def read_bty(self):
         if self.bty_file is None:
@@ -232,12 +256,12 @@ class Diamond_ARL():
             bottom_density=self.bottom_density,
             bottom_absorption=self.bottom_atten,
             tx_depth=self.source_depth,
-            rx_depth=np.linspace(0, self.max_depth-0.01, 201),
-            rx_range=np.linspace(0, self.max_range, 501),
+            rx_depth=np.linspace(0, self.max_depth-0.01, self.depth_points),
+            rx_range=np.linspace(0, self.max_range, self.range_points),
             min_angle=self.angle_min,
             max_angle=self.angle_max,
-            frequency=self.freq
-        )
+            frequency=self.freq,
+            nbeams=self.num_beams)
 
         return env
 
@@ -369,23 +393,23 @@ if __name__ == "__main__":
 
     # Run Ray Tracing
     run = Diamond_ARL(ssp_file=ssp_file, 
-                           freq=freq,
-                           source_level=source_level,
-                           angle_min=angle_min, 
-                           angle_max=angle_max, 
-                           source_depth=source_depth, 
-                           receiver_depth=receiver_depth,
-                           bottom_prop=bottom_prop,
-                           surface_prop=surface_prop,
-                           water_prop=water_prop,
-                           lon_start=lon_start,
-                           lon_end=lon_end,
-                           lat_start=lat_start,
-                           lat_end=lat_end,
-                           num_points=num_points,
-                           bty_file=bty_file, 
-                           ati_file=ati_file,
-                           save_dir=data_dir)
+                      freq=freq,
+                      source_level=source_level,
+                      angle_min=angle_min, 
+                      angle_max=angle_max, 
+                      source_depth=source_depth, 
+                      receiver_depth=receiver_depth,
+                      bottom_prop=bottom_prop,
+                      surface_prop=surface_prop,
+                      water_prop=water_prop,
+                      lon_start=lon_start,
+                      lon_end=lon_end,
+                      lat_start=lat_start,
+                      lat_end=lat_end,
+                      num_points=num_points,
+                      bty_file=bty_file, 
+                      ati_file=ati_file,
+                      save_dir=data_dir)
     
     # env = run.eigenray()
     # rays = pm.compute_eigenrays(env)

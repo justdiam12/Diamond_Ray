@@ -3,48 +3,54 @@ import numpy as np
 from pyram.pyram.PyRAM import PyRAM
 import matplotlib.pyplot as plt
 from pyproj import Geod
-from scipy.io import loadmat
+from scipy.io import loadmat, savemat
 from scipy.interpolate import RegularGridInterpolator
-
 
 
 class Diamond_PyRAM():
 
     def __init__(self,
-                 ssp_file,
-                 freq,
-                 source_level,
-                 source_depth,
-                 receiver_depth,
-                 bottom_prop,
-                 lon_start,
-                 lon_end,
-                 lat_start,
-                 lat_end,
-                 num_points,
-                 bty_file,
-                 save_dir):
+                 ssp_file=None,
+                 freq=None,
+                 source_level=None,
+                 source_depth=None,
+                 receiver_depth=None,
+                 bottom_prop=None,
+                 lon_start=None,
+                 lon_end=None,
+                 lat_start=None,
+                 lat_end=None,
+                 num_points=None,
+                 bty_file=None,
+                 save_dir=None):
 
-        self.ssp_file = ssp_file
-        self.bty_file = bty_file
-        self.save_dir = save_dir
+        if ssp_file is not None:
+            self.ssp_file = ssp_file
+        if bty_file is not None:    
+            self.bty_file = bty_file
+        if save_dir is not None:
+            self.save_dir = save_dir
+
 
         self.freq = freq
         self.source_level = source_level
         self.source_depth = source_depth
         self.receiver_depth = receiver_depth
 
-        self.bottom_density = bottom_prop[0]
-        self.bottom_ss = bottom_prop[1]
-        self.bottom_atten = bottom_prop[2]
+        if bottom_prop is not None:
+            self.bottom_density = bottom_prop[0]
+            self.bottom_ss = bottom_prop[1]
+            self.bottom_atten = bottom_prop[2]
 
         self.lon_start, self.lon_end = lon_start, lon_end
         self.lat_start, self.lat_end = lat_start, lat_end
 
         self.num_points = num_points  # IMPORTANT
 
-        self.ssp, self.ssp_depths, self.ssp_ranges = self.read_ssp()
-        self.rbzb = self.read_bty()
+        if ssp_file is not None:
+            self.ssp, self.ssp_depths, self.ssp_ranges = self.read_ssp()
+        if bty_file is not None:
+            self.rbzb = self.read_bty()
 
 
     def read_ssp(self):
@@ -60,7 +66,7 @@ class Diamond_PyRAM():
             ssp_ranges = ssp_data['ssp_ranges'].flatten() * 1000.0  # km → m
 
         return ssp, ssp_depths, ssp_ranges
-    
+
     def read_bty(self):
 
         if self.bty_file is None:
@@ -101,169 +107,224 @@ class Diamond_PyRAM():
 
         return rbzb
     
-    def create_model(self):
-        z_ss = self.ssp_depths
-        rp_ss = np.array([0.0])
-        cw = self.ssp.reshape(-1, 1)
+    def create_model(self, dr=None):
+        
+        if self.ssp.ndim == 1:
+            z_ss = self.ssp_depths
+            rp_ss = np.array([0.0])
+            cw = self.ssp.reshape(-1, 1)
 
-        z_sb = np.array([0.0])
-        rp_sb = np.array([0.0])
+            z_sb = np.array([0.0])
+            rp_sb = np.array([0.0])
 
-        cb = np.array([[self.bottom_ss]])
-        rhob = np.array([[self.bottom_density]])
-        attn = np.array([[self.bottom_atten]])
+            cb = np.array([[self.bottom_ss]])
+            rhob = np.array([[self.bottom_density]])
+            attn = np.array([[self.bottom_atten]])
 
-        rmax = self.rbzb[-1, 0]
+            rmax = self.rbzb[-1, 0]
 
-        model = PyRAM(
-            self.freq,
-            self.source_depth,
-            self.receiver_depth,
-            z_ss,
-            rp_ss,
-            cw,
-            z_sb,
-            rp_sb,
-            cb,
-            rhob,
-            attn,
-            self.rbzb,
-            rmax=rmax
-        )
+            model = PyRAM(
+                self.freq,
+                self.source_depth,
+                self.receiver_depth,
+                z_ss,
+                rp_ss,
+                cw,
+                z_sb,
+                rp_sb,
+                cb,
+                rhob,
+                attn,
+                self.rbzb,
+                rmax=rmax
+            )
 
-        return model
 
-# # -----------------------------
-# # Basic environment definition
-# # -----------------------------
+            return model
+        else: 
+            z_ss = self.ssp_depths
+            rp_ss = self.ssp_ranges
+            cw = self.ssp
 
-# freq = 3500.0        # Hz
-# zs = 33.0            # source depth (m)
-# zr = 50.0            # receiver depth (m)
-# water_depth = 100.0  # total water depth (m)
-# rmax = 8500.0        # 8.5 km
+            z_sb = np.array([0.0])
+            rp_sb = np.array([0.0])
 
-# # -----------------------------
-# # Water column (constant SSP)
-# # -----------------------------
+            cb = np.array([[self.bottom_ss]])
+            rhob = np.array([[self.bottom_density]])
+            attn = np.array([[self.bottom_atten]])
 
-# z_ss = np.linspace(0, water_depth, 101)      # water depths
-# rp_ss = np.array([0.0])                      # range-independent
-# cw = 1500.0 * np.ones((z_ss.size, 1))        # 1500 m/s everywhere
+            rmax = self.rbzb[-1, 0]
 
-# # -----------------------------
-# # Bottom properties (halfspace)
-# # -----------------------------
+            model = PyRAM(
+                self.freq,
+                self.source_depth,
+                self.receiver_depth,
+                z_ss,
+                rp_ss,
+                cw,
+                z_sb,
+                rp_sb,
+                cb,
+                rhob,
+                attn,
+                self.rbzb,
+                rmax=rmax
+            )
 
-# z_sb = np.array([0.0])                       # bottom layer thickness reference
-# rp_sb = np.array([0.0])                      # range-independent
+            return model
 
-# cb = np.array([[1700.0]])                    # bottom sound speed (m/s)
-# rhob = np.array([[1.8]])                     # density (g/cm^3)
-# attn = np.array([[0.5]])                     # attenuation (dB/wavelength)
+# # Save CASTAWAY results in .mat file and plot the TL grid
+# if __name__ == "__main__":
 
-# # -----------------------------
-# # Bathymetry (flat bottom)
-# # -----------------------------
+#     castaway_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/CAAS_DA/CASTAWAY'
+#     files = os.listdir(castaway_dir)
+#     for i in range(len(files)):
+#         if os.path.isdir(os.path.join(castaway_dir, files[i])):
+#             print(f"Processing {files[i]}...")
+#             data_dir = os.path.join(castaway_dir, files[i])
+#             ssp_file = os.path.join(data_dir, 'ssp.mat')
+#             bty_file = os.path.join(data_dir, 'bty.mat')
+#             source_level = 195 # dB re 1 μPa @ 1 m
+#             freq = 3500 # Hz
+#             source_depth = 25
+#             receiver_depth = 50
+#             bottom_prop = (2000, 1600, 0.8)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
+#             lon_start, lon_end = -122.8, -122.85
+#             lat_start, lat_end = 47.78, 47.71
+#             num_points = 1000
 
-# rbzb = np.array([
-#     [0.0, water_depth],
-#     [rmax, water_depth]
-# ])
+#             # Run Ray Tracing
+#             pyram = Diamond_PyRAM(ssp_file=ssp_file, 
+#                                 freq=freq,
+#                                 source_level=source_level,
+#                                 source_depth=source_depth, 
+#                                 receiver_depth=receiver_depth,
+#                                 bottom_prop=bottom_prop,
+#                                 lon_start=lon_start,
+#                                 lon_end=lon_end,
+#                                 lat_start=lat_start,
+#                                 lat_end=lat_end,
+#                                 num_points=num_points,
+#                                 bty_file=bty_file, 
+#                                 save_dir=data_dir)
 
-# # -----------------------------
-# # Create model
-# # -----------------------------
+#             model = pyram.create_model()
+#             results = model.run()
 
-# model = PyRAM(
-#     freq, zs, zr,
-#     z_ss, rp_ss, cw,
-#     z_sb, rp_sb, cb, rhob,
-#     attn, rbzb,
-#     rmax=rmax
-# )
+#             ranges = results["Ranges"]
+#             depths = results["Depths"]
+#             pl = pyram.source_level - results["TL Grid"]
 
-# # -----------------------------
-# # Run model
-# # -----------------------------
+#             save_path = os.path.join(data_dir, 'pyram.mat')
 
-# results = model.run()
+#             savemat(save_path, {
+#                 "ranges": ranges,
+#                 "depths": depths,
+#                 "pressure_level": pl
+#             })
 
-# ranges = results["Ranges"]
-# depths = results["Depths"]
-# tl_grid = results["TL Grid"]
+#             # Convert ranges to km for plotting
+#             ranges_km = ranges / 1000.0
 
-# # -----------------------------
-# # Plot TL
-# # -----------------------------
+#             plt.figure(figsize=(10, 6))
 
-# plt.figure(figsize=(10,6))
-# plt.imshow(
-#     tl_grid,
-#     extent=[ranges.min()/1000, ranges.max()/1000,
-#             depths.max(), depths.min()],
-#     aspect='auto',
-#     vmin=0,
-#     vmax=75
-# )
-# plt.colorbar(label="Transmission Loss (dB)")
-# plt.xlabel("Range (km)")
-# plt.ylabel("Depth (m)")
-# plt.title("PyRAM TL (Flat 100m Waveguide)")
-# plt.tight_layout()
-# plt.show()
+#             im = plt.imshow(
+#                 pl,
+#                 extent=[ranges_km.min(), ranges_km.max(),
+#                         depths.max(), depths.min()],
+#                 aspect='auto',
+#                 vmin=115,
+#                 vmax=150
+#             )
 
+#             plt.colorbar(im, label="Pressure Level (dB re 1 μPa)")
+#             plt.xlabel("Range (km)")
+#             plt.ylabel("Depth (m)")
+#             plt.title(f"{files[i]}")
+
+#             plt.tight_layout()
+
+#             fig_path = os.path.join(data_dir, "pyram.png")
+#             plt.savefig(fig_path, dpi=300)
+#             plt.close()
+
+#             print(f"Saved figure to {fig_path}")
+
+
+
+# Save LIVEOCEAN results in .mat file and plot the TL grid
 if __name__ == "__main__":
-    data_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/data_files'
-    ssp_file = os.path.join(data_dir, 'ssp.mat')
-    bty_file = os.path.join(data_dir, 'bty.mat')
-    source_level = 195 # dB re 1 μPa @ 1 m
-    freq = 3500 # Hz
-    source_depth = 40
-    receiver_depth = 50
-    bottom_prop = (2000, 1600, 0.8)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
-    lon_start, lon_end = -122.8, -122.85
-    lat_start, lat_end = 47.78, 47.71
-    num_points = 1000
 
-    # Run Ray Tracing
-    pyram = Diamond_PyRAM(ssp_file=ssp_file, 
-                           freq=freq,
-                           source_level=source_level,
-                           source_depth=source_depth, 
-                           receiver_depth=receiver_depth,
-                           bottom_prop=bottom_prop,
-                           lon_start=lon_start,
-                           lon_end=lon_end,
-                           lat_start=lat_start,
-                           lat_end=lat_end,
-                           num_points=num_points,
-                           bty_file=bty_file, 
-                           save_dir=data_dir)
+    liveocean_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/ARMS_DATA_MASTER/LIVEOCEAN'
+    files = os.listdir(liveocean_dir)
+    for i in range(len(files)):
+        if os.path.isdir(os.path.join(liveocean_dir, files[i])) and os.path.isfile(os.path.join(liveocean_dir, files[i]) + '/ssp.mat'):
+            print(f"Processing {files[i]}...")
+            data_dir = os.path.join(liveocean_dir, files[i])
+            ssp_file = os.path.join(data_dir, 'ssp.mat')
+            bty_file = os.path.join(data_dir, 'bty.mat')
+            source_level = 195 # dB re 1 μPa @ 1 m
+            freq = 3500 # Hz
+            source_depth = 25
+            receiver_depth = 50
+            bottom_prop = (2000, 1600, 0.8)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
+            lon_start, lon_end = -122.8, -122.85
+            lat_start, lat_end = 47.78, 47.71
+            num_points = 1000
 
-    model = pyram.create_model()
-    results = model.run()
+            # Run Ray Tracing
+            pyram = Diamond_PyRAM(ssp_file=ssp_file, 
+                                freq=freq,
+                                source_level=source_level,
+                                source_depth=source_depth, 
+                                receiver_depth=receiver_depth,
+                                bottom_prop=bottom_prop,
+                                lon_start=lon_start,
+                                lon_end=lon_end,
+                                lat_start=lat_start,
+                                lat_end=lat_end,
+                                num_points=num_points,
+                                bty_file=bty_file, 
+                                save_dir=data_dir)
 
-    ranges = results["Ranges"]
-    depths = results["Depths"]
-    tl_grid = results["TL Grid"]
+            model = pyram.create_model()
+            results = model.run()
 
-    # -----------------------------
-    # Plot Pressure Level
-    # -----------------------------
+            ranges = results["Ranges"]
+            depths = results["Depths"]
+            pl = pyram.source_level - results["TL Grid"]
 
-    plt.figure(figsize=(10,6))
-    plt.imshow(
-        195 -tl_grid,
-        extent=[ranges.min()/1000, ranges.max()/1000,
-                depths.max(), depths.min()],
-        aspect='auto',
-        vmin=110,
-        vmax=150
-    )
-    plt.colorbar(label="Pressure Level (dB re 1 μPa)")
-    plt.xlabel("Range (km)")
-    plt.ylabel("Depth (m)")
-    plt.title("Pressure Level Using ARMS SSP and Bathymetry")
-    plt.tight_layout()
-    plt.show()
+            save_path = os.path.join(data_dir, 'pyram.mat')
+
+            savemat(save_path, {
+                "ranges": ranges,
+                "depths": depths,
+                "pressure_level": pl
+            })
+
+            # Convert ranges to km for plotting
+            ranges_km = ranges / 1000.0
+
+            plt.figure(figsize=(10, 6))
+
+            im = plt.imshow(
+                pl,
+                extent=[ranges_km.min(), ranges_km.max(),
+                        depths.max(), depths.min()],
+                aspect='auto',
+                vmin=115,
+                vmax=150
+            )
+
+            plt.colorbar(im, label="Pressure Level (dB re 1 μPa)")
+            plt.xlabel("Range (km)")
+            plt.ylabel("Depth (m)")
+            plt.title(f"{files[i]}")
+
+            plt.tight_layout()
+
+            fig_path = os.path.join(data_dir, "pyram.png")
+            plt.savefig(fig_path, dpi=300)
+            plt.close()
+
+            print(f"Saved figure to {fig_path}")
