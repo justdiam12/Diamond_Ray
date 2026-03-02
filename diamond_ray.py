@@ -327,7 +327,7 @@ class Diamond_Ray_Code():
 
 
     # Plot Rays and SSP
-    def run(self):
+    def ray_fan(self):
         ray_data = {}
 
         # Filter for Range Independent SSP
@@ -351,7 +351,7 @@ class Diamond_Ray_Code():
             for angle in self.angles:
                 print(f"Propagating ray at {angle}°")
 
-                r, z, theta, time = self.propagate_ray(
+                r, z, theta, time, r_hist, r_coeff_hist = self.propagate_ray(
                     angle,
                     r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
                 )
@@ -361,7 +361,9 @@ class Diamond_Ray_Code():
                     "r": r,
                     "z": z,
                     "theta": theta,
-                    "time": time
+                    "time": time,
+                    "R_hist": r_hist,
+                    "R_coeff_hist": r_coeff_hist
                 }
 
                 ax_ray.plot(r / 1000, z)
@@ -508,4 +510,4 @@ if __name__ == "__main__":
                            ati_file=ati_file,
                            save_dir=data_dir)
     
-    ray.run()
+    ray.ray_fan()
