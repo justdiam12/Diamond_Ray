@@ -16,6 +16,7 @@ class Diamond_Ray_Code():
                  angle_max,
                  angle_precision,
                  source_depth,
+                 receiver_range,
                  bottom_prop,
                  surface_prop,
                  water_prop,
@@ -42,6 +43,7 @@ class Diamond_Ray_Code():
         self.angle_max = angle_max
         self.angle_precision = angle_precision
         self.source_depth = source_depth
+        self.receiver_range = receiver_range
 
         # Bottom, Surface, and Water Properties
         self.bottom_density = bottom_prop[0] # kg/m^3
@@ -199,7 +201,7 @@ class Diamond_Ray_Code():
             return self.dc_dz_interp(z)
 
 
-    def propagate_ray(self, theta0_deg, dr=5.0, r_max=100e3):
+    def propagate_ray(self, theta0_deg, dr=10.0, r_max=100e3):
         
         r = 0.0
         z = self.source_depth
@@ -290,7 +292,9 @@ class Diamond_Ray_Code():
             np.array(r_hist),
             np.array(z_hist),
             np.array(theta_hist),
-            np.array(time_hist)
+            np.array(time_hist),
+            np.array(R_hist),
+            np.array(R_coeff_hist)
         )
     
 
@@ -322,12 +326,127 @@ class Diamond_Ray_Code():
         return R
     
 
-    def eigenrays(self, depth):
-        return 0
+    def eigenrays(self, depth,
+              theta_min=-50,
+              theta_max=50,
+              dtheta=1.0,
+              max_eigen=10):
+
+        receiver_r = self.receiver_range
+        receiver_z = depth
+
+        theta_vals = np.arange(theta_min, theta_max + dtheta, dtheta)
+
+        eigen_list = []
+
+        prev_theta = None
+        prev_error = None
+
+        for theta0 in theta_vals:
+
+            print(f"Shooting {theta0:.2f}°")
+
+            r_hist, z_hist, _, _, _, _ = self.propagate_ray(
+                theta0,
+                r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
+            )
+
+            # If ray does not reach receiver range, skip
+            if receiver_r > r_hist[-1]:
+                prev_theta = theta0
+                prev_error = None
+                continue
+
+            z_at_rec = np.interp(receiver_r, r_hist, z_hist)
+            error = z_at_rec - receiver_z
+
+            print(f"   depth at receiver = {z_at_rec:.3f}, error = {error:.3f}")
+
+            # Detect sign change (root bracket)
+            if prev_error is not None and error * prev_error < 0:
+
+                print(f"   --> Bracket found between {prev_theta}° and {theta0}°")
+
+                theta_root = self.refine_eigenray(
+                    prev_theta,
+                    theta0,
+                    receiver_z
+                )
+
+                if theta_root is not None:
+
+                    # Re-propagate refined ray
+                    r_hist, z_hist, _, _, _, _ = self.propagate_ray(
+                        theta_root,
+                        r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
+                    )
+
+                    if receiver_r <= r_hist[-1]:
+                        z_final = np.interp(receiver_r, r_hist, z_hist)
+                        miss_distance = abs(z_final - receiver_z)
+
+                        print(f"   --> Refined depth = {z_final:.4f}, miss = {miss_distance:.4f} m")
+
+                        # Acceptance criterion
+                        if miss_distance < 0.1:
+                            eigen_list.append(theta_root)
+                            print(f"   --> Accepted eigenray at {theta_root:.6f}°")
+
+                            if len(eigen_list) >= max_eigen:
+                                break
+                        else:
+                            print("   --> Rejected (miss too large)")
+
+            prev_theta = theta0
+            prev_error = error
+
+        return eigen_list
+
+
+    def refine_eigenray(self,
+                        theta_low,
+                        theta_high,
+                        z_rec,
+                        tol=1e-4):
+
+        r_rec = self.receiver_range
+
+        for _ in range(100):
+
+            theta_mid = 0.5 * (theta_low + theta_high)
+
+            r_hist, z_hist, _, _, _, _ = self.propagate_ray(
+                theta_mid,
+                r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
+            )
+
+            if r_rec > r_hist[-1]:
+                return None
+
+            z_mid = np.interp(r_rec, r_hist, z_hist)
+            error_mid = z_mid - z_rec
+
+            r_hist, z_hist, _, _, _, _ = self.propagate_ray(
+                theta_low,
+                r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
+            )
+
+            z_low = np.interp(r_rec, r_hist, z_hist)
+            error_low = z_low - z_rec
+
+            if error_mid * error_low < 0:
+                theta_high = theta_mid
+            else:
+                theta_low = theta_mid
+
+            if abs(theta_high - theta_low) < tol:
+                break
+
+        return 0.5 * (theta_low + theta_high)
 
 
     # Plot Rays and SSP
-    def ray_fan(self):
+    def plot_ray_fan(self):
         ray_data = {}
 
         # Filter for Range Independent SSP
@@ -472,6 +591,69 @@ class Diamond_Ray_Code():
 
         print(f"Ray data saved to {output_file}")
 
+    def plot_eigenrays(self, eigen_list, receiver_depth):
+
+        receiver_r = self.receiver_range
+        r_max = self.bty_ranges[-1] if self.bty_ranges is not None else receiver_r
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        for theta0 in eigen_list:
+
+            if theta0 is None:
+                continue
+
+            print(f"Propagating eigenray at {theta0:.4f}°")
+
+            r, z, _, _, _, _ = self.propagate_ray(
+                theta0,
+                r_max=r_max
+            )
+
+            ax.plot(
+                r / 1000,
+                z,
+                lw=2.5,
+            )
+
+        # Plot bathymetry
+        if self.bty_ranges is not None:
+            ax.plot(
+                self.bty_ranges / 1000,
+                self.bty_depths,
+                'k',
+                lw=2
+            )
+
+        # Plot source
+        ax.plot(
+            0,
+            self.source_depth,
+            'ro',
+            markersize=8,
+            label="Source"
+        )
+
+        # Plot receiver
+        ax.plot(
+            receiver_r / 1000,
+            receiver_depth,
+            'ks',
+            markersize=8,
+            label="Receiver"
+        )
+
+        ax.set_xlabel("Range (km)")
+        ax.set_ylabel("Depth (m)")
+        ax.set_title("Eigenrays")
+        ax.invert_yaxis()
+        ax.grid()
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.save_dir, "eigenrays.png"), dpi=300)
+
+        print("Eigenray plot saved.")
+
 
 if __name__ == "__main__":
     data_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/data_files_ssp_long'
@@ -483,6 +665,7 @@ if __name__ == "__main__":
     angle_min, angle_max = -10, 10
     angle_precision = 1
     source_depth = 33
+    receiver_range = 8100 # Meters (m)
     water_prop = (1026, 0.1)  # density (kg/m^3), attenuation (dB/m kHz)
     bottom_prop = (2000, 3000, 0.5)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
     surface_prop = (200, 350, 0.1) # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
@@ -498,6 +681,7 @@ if __name__ == "__main__":
                            angle_max=angle_max, 
                            angle_precision=angle_precision,
                            source_depth=source_depth, 
+                           receiver_range=receiver_range,
                            bottom_prop=bottom_prop,
                            surface_prop=surface_prop,
                            water_prop=water_prop,
@@ -510,4 +694,6 @@ if __name__ == "__main__":
                            ati_file=ati_file,
                            save_dir=data_dir)
     
-    ray.ray_fan()
+    # ray.ray_fan()
+    eigen_list = ray.eigenrays(depth=55)
+    ray.plot_eigenrays(eigen_list, receiver_depth=55)
