@@ -251,7 +251,7 @@ class Diamond_Ray_Code():
                 z_new = self.z_surface + 1e-6
                 ds = dr_hit / np.cos(theta)
                 travel_time -= (dr / np.cos(theta)) / c
-                s -= travel_time * c
+                s -= (dr / np.cos(theta))
                 travel_time += ds / c    
                 s += ds
                 theta_new = -theta
@@ -271,7 +271,7 @@ class Diamond_Ray_Code():
                     r_new = r + dr_hit
                     z_new = z_b - 1e-6
                     travel_time -= (dr / np.cos(theta)) / c
-                    s -= travel_time * c
+                    s -= (dr / np.cos(theta))
                     ds = dr_hit / np.cos(theta)
                     s += ds
                     travel_time += ds / c
@@ -290,7 +290,6 @@ class Diamond_Ray_Code():
             r = r_new
             z = z_new
             theta = theta_new
-            # print(f"Range: {r}, Depth: {z}")
 
             r_hist.append(r)
             z_hist.append(z)
@@ -303,7 +302,7 @@ class Diamond_Ray_Code():
             np.array(z_hist),
             np.array(theta_hist),
             np.array(time_hist),
-            np.array(s),
+            np.array(s_hist),
             np.array(R_hist),
             np.array(R_coeff_hist)
         )
@@ -342,6 +341,12 @@ class Diamond_Ray_Code():
         receiver_r = self.receiver_range
         receiver_z = self.receiver_depth
 
+        if self.bty_ranges is not None:
+            bty_max = np.max(self.bty_ranges)
+            r_max = min(1.01*self.receiver_range, bty_max)
+        else:
+            r_max = 1.01*self.receiver_range
+
         theta_vals = np.arange(self.angle_min, self.angle_max + dtheta, dtheta)
 
         eigen_list = []
@@ -355,7 +360,7 @@ class Diamond_Ray_Code():
 
             r_hist, z_hist, _, _, _, _, _ = self.propagate_ray(
                 theta0,
-                r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
+                r_max=r_max
             )
 
             # If ray does not reach receiver range, skip
@@ -385,7 +390,7 @@ class Diamond_Ray_Code():
                     # Re-propagate refined ray
                     r_hist, z_hist, _, _, _, _, _ = self.propagate_ray(
                         theta_root,
-                        r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
+                        r_max=r_max
                     )
 
                     if receiver_r <= r_hist[-1]:
@@ -414,6 +419,11 @@ class Diamond_Ray_Code():
                         tol=1e-4):
 
         r_rec = self.receiver_range
+        if self.bty_ranges is not None:
+            bty_max = np.max(self.bty_ranges)
+            r_max = min(1.01*self.receiver_range, bty_max)
+        else:
+            r_max = 1.01*self.receiver_range
 
         for _ in range(100):
 
@@ -421,7 +431,7 @@ class Diamond_Ray_Code():
 
             r_hist, z_hist, _, _, _, _, _ = self.propagate_ray(
                 theta_mid,
-                r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
+                r_max=r_max
             )
 
             if r_rec > r_hist[-1]:
@@ -432,7 +442,7 @@ class Diamond_Ray_Code():
 
             r_hist, z_hist, _, _, _, _, _ = self.propagate_ray(
                 theta_low,
-                r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
+                r_max=r_max
             )
 
             z_low = np.interp(r_rec, r_hist, z_hist)
@@ -600,14 +610,60 @@ class Diamond_Ray_Code():
         print(f"Ray data saved to {output_file}")
 
 
+    def pressure_at_zr(self, theta0):
+        # Receiver Position
+        receiver_r = self.receiver_range
+        receiver_z = self.receiver_depth
+        if self.bty_ranges is not None:
+            bty_max = np.max(self.bty_ranges)
+            r_max = min(1.01*self.receiver_range, bty_max)
+        else:
+            r_max = 1.01*self.receiver_range
+
+        # Propagate Ray
+        r, z, theta, time, s, r_hist, r_coeff_hist = self.propagate_ray(
+            theta0,
+            r_max=r_max)
+
+        # Closest approach
+        dr = r - receiver_r
+        dz = z - receiver_z
+        distance = np.sqrt(dr**2 + dz**2)
+        idx = np.argmin(distance)
+
+        r_closest = r[idx]
+        z_closest = z[idx]
+        theta_closest = theta[idx]
+        time_closest = time[idx]
+        s_closest = s[idx]
+        
+        # Reflection Product
+        R_total = 1.0
+        for R in r_coeff_hist:
+            R_total *= R
+
+        # # Will worry about phase later
+        # c_local = self.c0  # or interpolate SSP if range-dependent
+        # k = 2*np.pi*self.freq / c_local
+
+        p = np.real(R_total * (1 / s_closest) * 10 ** (self.source_level / 20))
+
+        return p
+
+
     def plot_eigenrays(self, eigen_list):
 
         receiver_r = self.receiver_range
-        r_max = self.bty_ranges[-1] if self.bty_ranges is not None else receiver_r
+        if self.bty_ranges is not None:
+            bty_max = np.max(self.bty_ranges)
+            r_max = min(1.01*self.receiver_range, bty_max)
+        else:
+            r_max = 1.01*self.receiver_range
 
         fig, ax = plt.subplots(figsize=(10, 6))
 
         ray_data = {}
+        p_total = 0.0
 
         for theta0 in eigen_list:
 
@@ -620,6 +676,9 @@ class Diamond_Ray_Code():
                 theta0,
                 r_max=r_max
             )
+            p = self.pressure_at_zr(theta0=theta0)
+            p_total += np.abs(p)
+            print(f"Pressure: {p} uPa, {20*np.log10(np.abs(p))} dB")
 
             # Store eigenray data
             ray_data[f"ray_{theta0:.6f}deg"] = {
@@ -677,7 +736,11 @@ class Diamond_Ray_Code():
         plt.tight_layout()
         plt.savefig(os.path.join(self.save_dir, "eigenrays.png"), dpi=300)
 
-        # ---- Save MAT file ----
+        print("----------")
+        print(f"Total Pressure at Receiver: {p_total} uPa, {np.abs(20*np.log10(p_total))} dB")
+        print("----------")
+
+        # Save MAT file
         output_file = os.path.join(self.save_dir, "eigenrays.mat")
 
         savemat(output_file, {
@@ -705,8 +768,8 @@ if __name__ == "__main__":
     receiver_range = 8100 # Meters (m)
     receiver_depth = 55
     water_prop = (1026, 0.1)  # density (kg/m^3), attenuation (dB/m kHz)
-    bottom_prop = (2000, 3000, 0.5)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
-    surface_prop = (200, 350, 0.1) # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
+    bottom_prop = (2000, 3000, 0)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
+    surface_prop = (200, 350, 0) # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
     lon_start, lon_end = -122.8, -122.85
     lat_start, lat_end = 47.78, 47.71
     num_points = 1000
