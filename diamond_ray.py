@@ -17,6 +17,7 @@ class Diamond_Ray_Code():
                  angle_precision,
                  source_depth,
                  receiver_range,
+                 receiver_depth,
                  bottom_prop,
                  surface_prop,
                  water_prop,
@@ -44,6 +45,7 @@ class Diamond_Ray_Code():
         self.angle_precision = angle_precision
         self.source_depth = source_depth
         self.receiver_range = receiver_range
+        self.receiver_depth = receiver_depth
 
         # Bottom, Surface, and Water Properties
         self.bottom_density = bottom_prop[0] # kg/m^3
@@ -201,10 +203,11 @@ class Diamond_Ray_Code():
             return self.dc_dz_interp(z)
 
 
-    def propagate_ray(self, theta0_deg, dr=10.0, r_max=100e3):
+    def propagate_ray(self, theta0_deg, dr=5.0, r_max=100e3):
         
         r = 0.0
         z = self.source_depth
+        s = 0.0
         theta = np.deg2rad(theta0_deg)
         travel_time = 0.0
 
@@ -213,6 +216,7 @@ class Diamond_Ray_Code():
         z_hist = [z]
         theta_hist = [np.rad2deg(theta)]
         time_hist = [travel_time]
+        s_hist = [s]
         R_hist = []
         R_coeff_hist = []
 
@@ -238,6 +242,7 @@ class Diamond_Ray_Code():
             # Along Track Distance and Travel Time
             ds = dr / np.cos(theta)
             travel_time += ds / c
+            s += ds
 
             # Surface reflection
             if z_new <= self.z_surface and dz_dr < 0:
@@ -246,7 +251,9 @@ class Diamond_Ray_Code():
                 z_new = self.z_surface + 1e-6
                 ds = dr_hit / np.cos(theta)
                 travel_time -= (dr / np.cos(theta)) / c
+                s -= travel_time * c
                 travel_time += ds / c    
+                s += ds
                 theta_new = -theta
 
                 # Refelction Coefficient
@@ -264,7 +271,9 @@ class Diamond_Ray_Code():
                     r_new = r + dr_hit
                     z_new = z_b - 1e-6
                     travel_time -= (dr / np.cos(theta)) / c
+                    s -= travel_time * c
                     ds = dr_hit / np.cos(theta)
+                    s += ds
                     travel_time += ds / c
 
                     # Reflection
@@ -287,12 +296,14 @@ class Diamond_Ray_Code():
             z_hist.append(z)
             theta_hist.append(np.rad2deg(theta))
             time_hist.append(travel_time)
+            s_hist.append(s)
 
         return (
             np.array(r_hist),
             np.array(z_hist),
             np.array(theta_hist),
             np.array(time_hist),
+            np.array(s),
             np.array(R_hist),
             np.array(R_coeff_hist)
         )
@@ -317,7 +328,7 @@ class Diamond_Ray_Code():
         # Snell's Law
         sin_theta_t = (c2 / c1) * np.sin(theta_i)
 
-        # Allow complex transmission angle (critical angle physics)
+        # Complex transmission angle (critical angle physics)
         cos_theta_t = np.sqrt(1 - sin_theta_t**2 + 0j)
 
         R = (Z2 * np.cos(theta_i) - Z1 * cos_theta_t) / \
@@ -326,16 +337,12 @@ class Diamond_Ray_Code():
         return R
     
 
-    def eigenrays(self, depth,
-              theta_min=-50,
-              theta_max=50,
-              dtheta=1.0,
-              max_eigen=10):
+    def eigenrays(self, dtheta=1.0):
 
         receiver_r = self.receiver_range
-        receiver_z = depth
+        receiver_z = self.receiver_depth
 
-        theta_vals = np.arange(theta_min, theta_max + dtheta, dtheta)
+        theta_vals = np.arange(self.angle_min, self.angle_max + dtheta, dtheta)
 
         eigen_list = []
 
@@ -346,7 +353,7 @@ class Diamond_Ray_Code():
 
             print(f"Shooting {theta0:.2f}°")
 
-            r_hist, z_hist, _, _, _, _ = self.propagate_ray(
+            r_hist, z_hist, _, _, _, _, _ = self.propagate_ray(
                 theta0,
                 r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
             )
@@ -376,7 +383,7 @@ class Diamond_Ray_Code():
                 if theta_root is not None:
 
                     # Re-propagate refined ray
-                    r_hist, z_hist, _, _, _, _ = self.propagate_ray(
+                    r_hist, z_hist, _, _, _, _, _ = self.propagate_ray(
                         theta_root,
                         r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
                     )
@@ -391,9 +398,6 @@ class Diamond_Ray_Code():
                         if miss_distance < 0.1:
                             eigen_list.append(theta_root)
                             print(f"   --> Accepted eigenray at {theta_root:.6f}°")
-
-                            if len(eigen_list) >= max_eigen:
-                                break
                         else:
                             print("   --> Rejected (miss too large)")
 
@@ -415,7 +419,7 @@ class Diamond_Ray_Code():
 
             theta_mid = 0.5 * (theta_low + theta_high)
 
-            r_hist, z_hist, _, _, _, _ = self.propagate_ray(
+            r_hist, z_hist, _, _, _, _, _ = self.propagate_ray(
                 theta_mid,
                 r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
             )
@@ -426,7 +430,7 @@ class Diamond_Ray_Code():
             z_mid = np.interp(r_rec, r_hist, z_hist)
             error_mid = z_mid - z_rec
 
-            r_hist, z_hist, _, _, _, _ = self.propagate_ray(
+            r_hist, z_hist, _, _, _, _, _ = self.propagate_ray(
                 theta_low,
                 r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
             )
@@ -470,7 +474,7 @@ class Diamond_Ray_Code():
             for angle in self.angles:
                 print(f"Propagating ray at {angle}°")
 
-                r, z, theta, time, r_hist, r_coeff_hist = self.propagate_ray(
+                r, z, theta, time, s, r_hist, r_coeff_hist = self.propagate_ray(
                     angle,
                     r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
                 )
@@ -481,6 +485,7 @@ class Diamond_Ray_Code():
                     "z": z,
                     "theta": theta,
                     "time": time,
+                    "distance": s,
                     "R_hist": r_hist,
                     "R_coeff_hist": r_coeff_hist
                 }
@@ -513,7 +518,7 @@ class Diamond_Ray_Code():
             for angle in self.angles:
                 print(f"Propagating ray at {angle}°")
 
-                r, z, theta, time = self.propagate_ray(
+                r, z, theta, time, s, r_hist, r_coeff_hist = self.propagate_ray(
                     angle,
                     r_max=self.bty_ranges[-1] if self.bty_ranges is not None else 100e3
                 )
@@ -523,7 +528,10 @@ class Diamond_Ray_Code():
                     "r": r,
                     "z": z,
                     "theta": theta,
-                    "time": time
+                    "time": time,
+                    "distance": s,
+                    "R_hist": r_hist,
+                    "R_coeff_hist": r_coeff_hist
                 }
 
                 ax_ray.plot(r / 1000, z)
@@ -591,32 +599,48 @@ class Diamond_Ray_Code():
 
         print(f"Ray data saved to {output_file}")
 
-    def plot_eigenrays(self, eigen_list, receiver_depth):
+
+    def plot_eigenrays(self, eigen_list):
 
         receiver_r = self.receiver_range
         r_max = self.bty_ranges[-1] if self.bty_ranges is not None else receiver_r
 
         fig, ax = plt.subplots(figsize=(10, 6))
 
+        ray_data = {}
+
         for theta0 in eigen_list:
 
             if theta0 is None:
                 continue
 
-            print(f"Propagating eigenray at {theta0:.4f}°")
+            print(f"Propagating eigenray at {theta0:.6f}°")
 
-            r, z, _, _, _, _ = self.propagate_ray(
+            r, z, theta, time, s, r_hist, r_coeff_hist = self.propagate_ray(
                 theta0,
                 r_max=r_max
             )
 
+            # Store eigenray data
+            ray_data[f"ray_{theta0:.6f}deg"] = {
+                "r": r,
+                "z": z,
+                "theta": theta,
+                "time": time,
+                "distance": s,
+                "R_hist": r_hist,
+                "R_coeff_hist": r_coeff_hist
+            }
+
+            # Plot
             ax.plot(
                 r / 1000,
                 z,
                 lw=2.5,
+                label=f"{theta0:.3f}°"
             )
 
-        # Plot bathymetry
+        # Bathymetry
         if self.bty_ranges is not None:
             ax.plot(
                 self.bty_ranges / 1000,
@@ -625,7 +649,7 @@ class Diamond_Ray_Code():
                 lw=2
             )
 
-        # Plot source
+        # Source
         ax.plot(
             0,
             self.source_depth,
@@ -634,10 +658,10 @@ class Diamond_Ray_Code():
             label="Source"
         )
 
-        # Plot receiver
+        # Receiver
         ax.plot(
             receiver_r / 1000,
-            receiver_depth,
+            self.receiver_depth,
             'ks',
             markersize=8,
             label="Receiver"
@@ -648,11 +672,24 @@ class Diamond_Ray_Code():
         ax.set_title("Eigenrays")
         ax.invert_yaxis()
         ax.grid()
+        ax.legend()
 
         plt.tight_layout()
         plt.savefig(os.path.join(self.save_dir, "eigenrays.png"), dpi=300)
 
-        print("Eigenray plot saved.")
+        # ---- Save MAT file ----
+        output_file = os.path.join(self.save_dir, "eigenrays.mat")
+
+        savemat(output_file, {
+            "frequency": self.freq,
+            "angles_deg": np.array(eigen_list),
+            "source_depth": self.source_depth,
+            "receiver_depth": self.receiver_depth,
+            "receiver_range": self.receiver_range,
+            "ray_data": ray_data
+        })
+
+        print(f"Eigenray data saved to {output_file}")
 
 
 if __name__ == "__main__":
@@ -662,10 +699,11 @@ if __name__ == "__main__":
     ati_file = os.path.join(data_dir, 'ati.mat')
     source_level = 195 # dB re 1 μPa @ 1 m
     freq = 3500 # Hz
-    angle_min, angle_max = -10, 10
+    angle_min, angle_max = -50, 50
     angle_precision = 1
     source_depth = 33
     receiver_range = 8100 # Meters (m)
+    receiver_depth = 55
     water_prop = (1026, 0.1)  # density (kg/m^3), attenuation (dB/m kHz)
     bottom_prop = (2000, 3000, 0.5)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
     surface_prop = (200, 350, 0.1) # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
@@ -682,6 +720,7 @@ if __name__ == "__main__":
                            angle_precision=angle_precision,
                            source_depth=source_depth, 
                            receiver_range=receiver_range,
+                           receiver_depth=receiver_depth,
                            bottom_prop=bottom_prop,
                            surface_prop=surface_prop,
                            water_prop=water_prop,
@@ -695,5 +734,5 @@ if __name__ == "__main__":
                            save_dir=data_dir)
     
     # ray.ray_fan()
-    eigen_list = ray.eigenrays(depth=55)
-    ray.plot_eigenrays(eigen_list, receiver_depth=55)
+    eigen_list = ray.eigenrays()
+    ray.plot_eigenrays(eigen_list)
