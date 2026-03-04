@@ -35,33 +35,38 @@ class Diamond_Ray_Code():
         self.ati_file = ati_file
         self.save_dir = save_dir
 
-        # Read data
+        # Read SSP and BTY
         self.ssp, self.ssp_depths, self.ssp_ranges = self.read_ssp()
+        self.lon_start, self.lon_end = lon_start, lon_end
+        self.lat_start, self.lat_end = lat_start, lat_end
+        self.num_points = num_points
+        self.bty_depths, self.bty_ranges = self.read_bty()
 
+        # Properties
         self.freq = freq
         self.source_level = source_level
         self.angle_min = angle_min
         self.angle_max = angle_max
         self.angle_precision = angle_precision
         self.source_depth = source_depth
-        self.receiver_range = receiver_range
+
+        if receiver_range is not None:
+            self.receiver_range = receiver_range
+        else:
+            self.receiver_range = np.round(np.max(self.bty_ranges-1))
         self.receiver_depth = receiver_depth
 
         # Bottom, Surface, and Water Properties
         self.bottom_density = bottom_prop[0] # kg/m^3
         self.bottom_ss = bottom_prop[1]      # m/s
-        self.bottom_atten = bottom_prop[2]   # 
+        self.bottom_atten = bottom_prop[2] / 8.686  # Np/m
         self.surface_density = surface_prop[0] # kg/m^3
         self.surface_ss = surface_prop[1]      # m/s
-        self.surface_atten = surface_prop[2]   # 
+        self.surface_atten = surface_prop[2] / 8.686  # Np/m
         self.water_density = water_prop[0] # kg/m^3
-        self.water_atten = water_prop[1]   # dB/m kHz
+        self.water_atten = water_prop[1] / 8.686  # Np/m
 
-        self.lon_start, self.lon_end = lon_start, lon_end
-        self.lat_start, self.lat_end = lat_start, lat_end
-        self.num_points = num_points
-
-        self.bty_depths, self.bty_ranges = self.read_bty()
+        # Angles
         self.angles = np.arange(self.angle_min, self.angle_max + 1, 1)
 
         # SSP Interpolator
@@ -336,7 +341,7 @@ class Diamond_Ray_Code():
         return R
     
 
-    def eigenrays(self, dtheta=1.0):
+    def eigenrays(self, dtheta=1.0, tol=0.5):
 
         receiver_r = self.receiver_range
         receiver_z = self.receiver_depth
@@ -400,7 +405,7 @@ class Diamond_Ray_Code():
                         print(f"   --> Refined depth = {z_final:.4f}, miss = {miss_distance:.4f} m")
 
                         # Acceptance criterion
-                        if miss_distance < 0.1:
+                        if miss_distance < tol:
                             eigen_list.append(theta_root)
                             print(f"   --> Accepted eigenray at {theta_root:.6f}°")
                         else:
@@ -425,7 +430,7 @@ class Diamond_Ray_Code():
         else:
             r_max = 1.01*self.receiver_range
 
-        for _ in range(100):
+        for _ in range(1000):
 
             theta_mid = 0.5 * (theta_low + theta_high)
 
@@ -631,10 +636,7 @@ class Diamond_Ray_Code():
         distance = np.sqrt(dr**2 + dz**2)
         idx = np.argmin(distance)
 
-        r_closest = r[idx]
-        z_closest = z[idx]
-        theta_closest = theta[idx]
-        time_closest = time[idx]
+        # Distance Travelled
         s_closest = s[idx]
         
         # Reflection Product
@@ -646,7 +648,8 @@ class Diamond_Ray_Code():
         # c_local = self.c0  # or interpolate SSP if range-dependent
         # k = 2*np.pi*self.freq / c_local
 
-        p = np.real(R_total * (1 / s_closest) * 10 ** (self.source_level / 20))
+        p = np.real(R_total * (1 / s_closest) * np.exp(self.water_atten * s_closest) * 10 ** (self.source_level / 20))
+        print(f"Pressure: {p} uPa, {20*np.log10(np.abs(p))} dB, Distance Travelled: {s_closest} m, Bounces: {r_hist}")
 
         return p
 
@@ -678,7 +681,6 @@ class Diamond_Ray_Code():
             )
             p = self.pressure_at_zr(theta0=theta0)
             p_total += np.abs(p)
-            print(f"Pressure: {p} uPa, {20*np.log10(np.abs(p))} dB")
 
             # Store eigenray data
             ray_data[f"ray_{theta0:.6f}deg"] = {
@@ -765,11 +767,11 @@ if __name__ == "__main__":
     angle_min, angle_max = -50, 50
     angle_precision = 1
     source_depth = 33
-    receiver_range = 8100 # Meters (m)
+    receiver_range = None # Meters (m)
     receiver_depth = 55
     water_prop = (1026, 0.1)  # density (kg/m^3), attenuation (dB/m kHz)
-    bottom_prop = (2000, 3000, 0)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
-    surface_prop = (200, 350, 0) # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
+    bottom_prop = (2000, 3000, 0.2)  # density (kg/m^3), sound speed (m/s), attenuation ()
+    surface_prop = (200, 350, 0.1) # density (kg/m^3), sound speed (m/s), attenuation ()
     lon_start, lon_end = -122.8, -122.85
     lat_start, lat_end = 47.78, 47.71
     num_points = 1000
