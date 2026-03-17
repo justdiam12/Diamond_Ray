@@ -20,21 +20,20 @@ if __name__ == "__main__":
     bty_depths = np.ones(len(bty_ranges)) * 200
     source_level = 195
     freq = 3500
-    angle_min, angle_max = -35, 35
+    angle_min, angle_max = -30, 30
     source_depth = 25
     receiver_depth = 55
     water_prop = (1026, 0.1)
     bottom_prop = (2000, 3000, 0.2)
-    surface_prop = (1000, 350, 0.1)
-    lon_start, lon_end = -122.8, -122.85
-    lat_start, lat_end = 47.78, 47.71
-    num_points = 1000
+    lon_start, lon_end = -122.8, -122.84
+    lat_start, lat_end = 47.78, 47.73
+    num_points = 85
 
     # PYRAM 
     pyram = Diamond_PyRAM()
-    # pyram.ssp = ssp
-    # pyram.ssp_depths = ssp_depths
-    # pyram.ssp_ranges = [0]
+    pyram.ssp = ssp
+    pyram.ssp_depths = ssp_depths
+    pyram.ssp_ranges = [0]
     pyram.ssp_file = ssp_file
     pyram.ssp, pyram.ssp_depths, pyram.ssp_ranges = pyram.read_ssp()
     pyram.bty_file = bty_file
@@ -50,7 +49,7 @@ if __name__ == "__main__":
     pyram.lat_start = lat_start
     pyram.lat_end = lat_end
     pyram.num_points = num_points
-    # pyram.rbzb = np.column_stack((bty_ranges, bty_depths))
+    pyram.rbzb = np.column_stack((bty_ranges, bty_depths))
     pyram.rbzb = pyram.read_bty()
     pyram_model = pyram.create_model(dr=0.5)
     results = pyram_model.run()
@@ -63,7 +62,7 @@ if __name__ == "__main__":
     arlpy = Diamond_ARL()
     arlpy.ssp = [[ssp_depths[i], ssp[i]] for i in range(len(ssp_depths))]
     arlpy.ssp_file = ssp_file
-    # arlpy.ssp = arlpy.read_ssp()
+    arlpy.ssp = arlpy.read_ssp()
     arlpy.bty_file = bty_file
     arlpy.source_level = source_level
     arlpy.freq = freq
@@ -73,22 +72,19 @@ if __name__ == "__main__":
     arlpy.bottom_density = bottom_prop[0]
     arlpy.bottom_ss = bottom_prop[1]
     arlpy.bottom_atten = bottom_prop[2]
-    arlpy.surface_density = surface_prop[0]
-    arlpy.surface_ss = surface_prop[1]
-    arlpy.surface_atten = surface_prop[2]
     arlpy.water_density = water_prop[0]
     arlpy.water_atten = water_prop[1]
     arlpy.lon_start = lon_start
     arlpy.lon_end = lon_end
     arlpy.lat_start = lat_start
     arlpy.lat_end = lat_end
-    arlpy.num_points = num_points
     arlpy.range_points = len(pyram_ranges)
     arlpy.depth_points = len(pyram_depths)
-    # arlpy.bty, arlpy.max_range, arlpy.max_depth = [[bty_ranges[i], bty_depths[i]] for i in range(len(bty_ranges))], max(bty_ranges), max(bty_depths)
+    arlpy.num_points = num_points
+    arlpy.bty, arlpy.max_range, arlpy.max_depth = [[bty_ranges[i], bty_depths[i]] for i in range(len(bty_ranges))], max(bty_ranges), max(bty_depths)
     arlpy.bty, arlpy.max_range, arlpy.max_depth = arlpy.read_bty()
-    arlpy.num_beams = 5000
-    arlpy.angles = np.arange(angle_min, angle_max + 1, 0.001)
+    arlpy.angles = np.arange(angle_min, angle_max + 1, 0.1)
+    arlpy.num_beams = len(arlpy.angles)
 
     env = arlpy.coherent_tl()
     # print(env)
