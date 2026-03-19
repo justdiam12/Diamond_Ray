@@ -5,50 +5,70 @@ from pyproj import Geod
 from scipy.io import loadmat
 from scipy.interpolate import interp1d, RegularGridInterpolator
 from scipy.io import savemat
+from scipy.signal import chirp, windows
 
 
 class Diamond_Ray_Code():
     def __init__(self, 
-                 ssp_file, 
-                 freq,
-                 source_level,
-                 angle_min,
-                 angle_max,
-                 angle_precision,
-                 source_depth,
-                 receiver_range,
-                 receiver_depth,
-                 bottom_prop,
-                 surface_prop,
-                 water_prop,
-                 lon_start,
-                 lon_end,
-                 lat_start,
-                 lat_end,
-                 num_points,
-                 bty_file, 
-                 ati_file,
-                 save_dir):
+                 ssp_file=None, 
+                 freq=None,
+                 source_level=None,
+                 angle_min=None,
+                 angle_max=None,
+                 angle_precision=None,
+                 source_depth=None,
+                 receiver_range=None,
+                 receiver_depth=None,
+                 bottom_prop=None,
+                 surface_prop=None,
+                 water_prop=None,
+                 lon_start=None,
+                 lon_end=None,
+                 lat_start=None,
+                 lat_end=None,
+                 num_points=None,
+                 bty_file=None, 
+                 ati_file=None,
+                 signal=None,
+                 signal_time=None,
+                 save_dir=None):
 
-        self.ssp_file = ssp_file
-        self.bty_file = bty_file
-        self.ati_file = ati_file
-        self.save_dir = save_dir
+        if ssp_file is not None:
+            self.ssp_file = ssp_file
+            self.ssp, self.ssp_depths, self.ssp_ranges = self.read_ssp()
+        if bty_file is not None:
+            self.bty_file = bty_file
+        if ati_file is not None:
+            self.ati_file = ati_file
+        if save_dir is not None:
+            self.save_dir = save_dir
 
         # Read SSP and BTY
-        self.ssp, self.ssp_depths, self.ssp_ranges = self.read_ssp()
-        self.lon_start, self.lon_end = lon_start, lon_end
-        self.lat_start, self.lat_end = lat_start, lat_end
-        self.num_points = num_points
-        self.bty_depths, self.bty_ranges = self.read_bty()
+        if lon_start is not None and lon_end is not None:
+            self.lon_start, self.lon_end = lon_start, lon_end
+        if lat_start is not None and lat_end is not None:
+            self.lat_start, self.lat_end = lat_start, lat_end
+        if num_points is not None:
+            self.num_points = num_points
+        if bty_file is not None and num_points is not None:
+            self.bty_depths, self.bty_ranges = self.read_bty()
+        else:
+            self.bty_depths = None
+            self.bty_ranges = None
 
         # Properties
-        self.freq = freq
-        self.source_level = source_level
-        self.angle_min = angle_min
-        self.angle_max = angle_max
-        self.angle_precision = angle_precision
-        self.source_depth = source_depth
+        if freq is not None:
+            self.freq = freq
+        if source_level is not None:
+            self.source_level = source_level
+        if angle_min is not None:
+            self.angle_min = angle_min
+        if angle_max is not None:
+            self.angle_max = angle_max
+        if angle_precision is not None:
+            self.angle_precision = angle_precision
+        if source_depth is not None:
+            self.source_depth = source_depth
 
         if receiver_range is not None:
             self.receiver_range = receiver_range
@@ -57,64 +77,36 @@ class Diamond_Ray_Code():
         self.receiver_depth = receiver_depth
 
         # Bottom, Surface, and Water Properties
-        self.bottom_density = bottom_prop[0] # kg/m^3
-        self.bottom_ss = bottom_prop[1]      # m/s
-        self.bottom_atten = bottom_prop[2] / 8.686  # Np/m
-        self.surface_density = surface_prop[0] # kg/m^3
-        self.surface_ss = surface_prop[1]      # m/s
-        self.surface_atten = surface_prop[2] / 8.686  # Np/m
-        self.water_density = water_prop[0] # kg/m^3
-        self.water_atten = water_prop[1] / 8.686  # Np/m
+        if bottom_prop is not None:
+            self.bottom_density = bottom_prop[0] # kg/m^3
+            self.bottom_ss = bottom_prop[1]      # m/s
+            self.bottom_atten = bottom_prop[2] # Np/m
+        if surface_prop is not None:
+            self.surface_density = surface_prop[0] # kg/m^3
+            self.surface_ss = surface_prop[1]      # m/s
+            self.surface_atten = surface_prop[2] # Np/m
+        if water_prop is not None:
+            self.water_density = water_prop[0] # kg/m^3
+            self.water_atten = water_prop[1] # Np/m
 
         # Angles
-        self.angles = np.arange(self.angle_min, self.angle_max + 1, 1)
+        if angle_min is not None and angle_max is not None and angle_precision is not None:
+            self.angles = np.arange(self.angle_min, self.angle_max + 1, 1)
+
+        # Signal to Append
+        if signal is not None:
+            self.signal = signal
+        if signal_time is not None:
+            self.signal_time = signal_time
 
         # SSP Interpolator
         if self.ssp.ndim == 1:
             # Range-independent SSP c(z)
             self.range_dependent_ssp = False
-
-            self.c_interp = interp1d(
-                self.ssp_depths,
-                self.ssp,
-                bounds_error=False,
-                fill_value="extrapolate"
-            )
-
-            dc_dz = np.gradient(self.ssp, self.ssp_depths)
-            self.dc_dz_interp = interp1d(
-                self.ssp_depths,
-                dc_dz,
-                bounds_error=False,
-                fill_value="extrapolate"
-            )
-
-            self.z_bottom = self.ssp_depths.max()
-
         else:
             # Range-dependent SSP c(r, z)
             self.range_dependent_ssp = True
-
-            # Ensure shape = (Nr, Nz)
-            if self.ssp.shape == (len(self.ssp_depths), len(self.ssp_ranges)):
-                self.ssp = self.ssp.T
-
-            self.c_interp = RegularGridInterpolator(
-                (self.ssp_ranges, self.ssp_depths),
-                self.ssp,
-                bounds_error=False,
-                fill_value=None
-            )
-
-            dc_dz = np.gradient(self.ssp, self.ssp_depths, axis=1)
-            self.dc_dz_interp = RegularGridInterpolator(
-                (self.ssp_ranges, self.ssp_depths),
-                dc_dz,
-                bounds_error=False,
-                fill_value=None
-            )
-
-            self.z_bottom = self.ssp_depths.max()
+        self.build_c_derivative()
 
         # Surface
         self.z_surface = 0.0
@@ -194,111 +186,189 @@ class Diamond_Ray_Code():
         return np.abs(bty_depths), bty_ranges
 
 
-    def c(self, z, r):
-        if self.range_dependent_ssp:
-            return self.c_interp((r, z))
+    def build_c_derivative(self):
+        if self.range_dependent_ssp is False:
+            z = self.ssp_depths
+            c = self.ssp
+            n = len(z)
+            slopes = np.zeros(n)
+            for i in range(n - 1):
+                dz = z[i+1] - z[i]
+                slopes[i] = (c[i+1] - c[i]) / dz
+            slopes[-1] = slopes[-2]
+            self.ssp_slopes = slopes
         else:
-            return self.c_interp(z)
+            # Fix this for range-dependent SSP
+            self.ssp_slopes = []
+
+
+    def c(self, z, r):
+        if self.range_dependent_ssp is False:
+            depths = self.ssp_depths
+            cvals = self.ssp
+
+            if z <= depths[0]:
+                return cvals[0]
+
+            if z >= depths[-1]:
+                return cvals[-1]
+
+            idx = np.searchsorted(depths, z) - 1
+
+            z0 = depths[idx]
+            z1 = depths[idx+1]
+
+            c0 = cvals[idx]
+            c1 = cvals[idx+1]
+
+            w = (z - z0) / (z1 - z0)
+
+            return c0 + w*(c1 - c0)
+        
+        else:
+            # Fix this later for range-dependent SSP
+            return 0
 
 
     def dc_dz(self, z, r):
-        if self.range_dependent_ssp:
-            return self.dc_dz_interp((r, z))
+
+        if self.range_dependent_ssp is False:
+            depths = self.ssp_depths
+            if z <= depths[0]:
+                return self.ssp_slopes[0]
+
+            if z >= depths[-1]:
+                return self.ssp_slopes[-1]
+            idx = np.searchsorted(depths, z) - 1
+            return self.ssp_slopes[idx]
         else:
-            return self.dc_dz_interp(z)
+            # Fix this for range-dependent SSP
+            return 0
+    
 
+    def propagate_ray(self, theta0_deg, dr=10, r_max=100e3):
 
-    def propagate_ray(self, theta0_deg, dr=5.0, r_max=100e3):
-        
         r = 0.0
         z = self.source_depth
-        s = 0.0
-        theta = np.deg2rad(theta0_deg)
-        travel_time = 0.0
+        tau = np.tan(np.deg2rad(theta0_deg))
 
-        # Range, Depth, and Travel Time History
+        travel_time = 0.0
+        s = 0.0
+
         r_hist = [r]
         z_hist = [z]
-        theta_hist = [np.rad2deg(theta)]
+        theta_hist = [theta0_deg]
         time_hist = [travel_time]
         s_hist = [s]
         R_hist = []
         R_coeff_hist = []
 
-        while r < r_max:
+        eps = 1e-6
 
-            theta = np.clip(theta, -np.pi/2 + 1e-6, np.pi/2 - 1e-6)
+        while r < r_max:
 
             c = self.c(z, r)
             dc_dz = self.dc_dz(z, r)
 
-            if c is None:
-                break
+            tang = -dc_dz / c
 
-            # Ray equations
-            dz_dr = np.tan(theta)
-            dtheta_dr = -(1.0 / c) * dc_dz / np.cos(theta)
+            # RK4 coefficients
+            k1_tau = (1 + tau**2) * tang
+            k1_z = tau
 
-            # Step forward
+            z2 = z + k1_z * dr / 2
+            tau2 = tau + k1_tau * dr / 2
+            c2 = self.c(z2, r + dr/2)
+            dc_dz2 = self.dc_dz(z2, r + dr/2)
+            tang2 = -dc_dz2 / c2
+
+            k2_tau = (1 + tau2**2) * tang2
+            k2_z = tau2
+
+            z3 = z + k2_z * dr / 2
+            tau3 = tau + k2_tau * dr / 2
+            c3 = self.c(z3, r + dr/2)
+            dc_dz3 = self.dc_dz(z3, r + dr/2)
+            tang3 = -dc_dz3 / c3
+
+            k3_tau = (1 + tau3**2) * tang3
+            k3_z = tau3
+
+            z4 = z + k3_z * dr
+            tau4 = tau + k3_tau * dr
+            c4 = self.c(z4, r + dr)
+            dc_dz4 = self.dc_dz(z4, r + dr)
+            tang4 = -dc_dz4 / c4
+
+            k4_tau = (1 + tau4**2) * tang4
+            k4_z = tau4
+
+            # RK4 update
+            z_new = z + (dr/6) * (k1_z + 2*k2_z + 2*k3_z + k4_z)
+            tau_new = tau + (dr/6) * (k1_tau + 2*k2_tau + 2*k3_tau + k4_tau)
+
             r_new = r + dr
-            z_new = z + dz_dr * dr
-            theta_new = theta + dtheta_dr * dr
 
-            # Along Track Distance and Travel Time
+            theta = np.arctan(tau)
+
+            # path length
             ds = dr / np.cos(theta)
-            travel_time += ds / c
             s += ds
+            travel_time += ds / c
 
             # Surface reflection
-            if z_new <= self.z_surface and dz_dr < 0:
-                dr_hit = (self.z_surface - z) / dz_dr
-                r_new = r + dr_hit
-                z_new = self.z_surface + 1e-6
-                ds = dr_hit / np.cos(theta)
-                travel_time -= (dr / np.cos(theta)) / c
-                s -= (dr / np.cos(theta))
-                travel_time += ds / c    
-                s += ds
-                theta_new = -theta
+            if z_new <= self.z_surface and tau < 0:
 
-                # Refelction Coefficient
+                dr_hit = (self.z_surface - z) / tau
+
+                r_new = r + dr_hit
+                z_new = self.z_surface + eps
+                tau_new = -tau
+
+                ds = dr_hit / np.cos(theta)
+                s += ds
+                travel_time += ds / c
+
                 theta_rel = theta
                 R = self.reflection_coefficient(theta_rel, z, r, 'surface')
+
                 R_hist.append('T')
                 R_coeff_hist.append(R)
 
-            # Bottom reflection 
+            # Bottom reflection
             elif self.bty_interp is not None:
+
                 z_b = self.bty_interp(r_new)
 
-                if z_new >= z_b and dz_dr > 0:
-                    dr_hit = (z_b - z) / dz_dr
-                    r_new = r + dr_hit
-                    z_new = z_b - 1e-6
-                    travel_time -= (dr / np.cos(theta)) / c
-                    s -= (dr / np.cos(theta))
-                    ds = dr_hit / np.cos(theta)
-                    s += ds
-                    travel_time += ds / c
+                if z_new >= z_b and tau > 0:
 
-                    # Reflection
+                    dr_hit = (z_b - z) / tau
+
+                    r_new = r + dr_hit
+                    z_new = z_b - eps
                     slope = self.dbty_dr_interp(r_new)
                     phi = np.arctan(slope)
                     theta_new = 2 * phi - theta
+                    tau_new = np.tan(theta_new)
 
-                    # Refelction Coefficient
+                    ds = dr / np.cos(theta)
+                    s += ds
+                    travel_time += ds / c
+
                     theta_rel = theta - phi
                     R = self.reflection_coefficient(theta_rel, z, r, 'bottom')
+
                     R_hist.append('B')
                     R_coeff_hist.append(R)
 
+            # update state
             r = r_new
             z = z_new
-            theta = theta_new
+            tau = tau_new
 
             r_hist.append(r)
             z_hist.append(z)
-            theta_hist.append(np.rad2deg(theta))
+            theta_hist.append(np.rad2deg(np.arctan(tau)))
             time_hist.append(travel_time)
             s_hist.append(s)
 
@@ -341,7 +411,7 @@ class Diamond_Ray_Code():
         return R
     
 
-    def eigenrays(self, dtheta=1.0, tol=0.5):
+    def eigenrays(self, dtheta=0.1, tol=1):
 
         receiver_r = self.receiver_range
         receiver_z = self.receiver_depth
@@ -421,42 +491,54 @@ class Diamond_Ray_Code():
                         theta_low,
                         theta_high,
                         z_rec,
-                        tol=1e-4):
+                        tol=1e-10):
 
         r_rec = self.receiver_range
+
         if self.bty_ranges is not None:
             bty_max = np.max(self.bty_ranges)
             r_max = min(1.01*self.receiver_range, bty_max)
         else:
             r_max = 1.01*self.receiver_range
 
-        for _ in range(1000):
+        # --- shoot lower ray ---
+        r_hist, z_hist, *_ = self.propagate_ray(theta_low, r_max=r_max)
+        if r_rec > r_hist[-1]:
+            return None
+
+        z_low = np.interp(r_rec, r_hist, z_hist)
+        error_low = z_low - z_rec
+
+        # --- shoot upper ray ---
+        r_hist, z_hist, *_ = self.propagate_ray(theta_high, r_max=r_max)
+        if r_rec > r_hist[-1]:
+            return None
+
+        z_high = np.interp(r_rec, r_hist, z_hist)
+        error_high = z_high - z_rec
+
+        # Ensure bracket
+        if error_low * error_high > 0:
+            return None
+
+        for i in range(1000):
 
             theta_mid = 0.5 * (theta_low + theta_high)
 
-            r_hist, z_hist, _, _, _, _, _ = self.propagate_ray(
-                theta_mid,
-                r_max=r_max
-            )
-
+            r_hist, z_hist, *_ = self.propagate_ray(theta_mid, r_max=r_max)
             if r_rec > r_hist[-1]:
                 return None
 
             z_mid = np.interp(r_rec, r_hist, z_hist)
             error_mid = z_mid - z_rec
 
-            r_hist, z_hist, _, _, _, _, _ = self.propagate_ray(
-                theta_low,
-                r_max=r_max
-            )
-
-            z_low = np.interp(r_rec, r_hist, z_hist)
-            error_low = z_low - z_rec
-
-            if error_mid * error_low < 0:
+            # Determine which bracket contains receiver
+            if error_low * error_mid < 0:
                 theta_high = theta_mid
+                error_high = error_mid
             else:
                 theta_low = theta_mid
+                error_low = error_mid
 
             if abs(theta_high - theta_low) < tol:
                 break
@@ -517,7 +599,7 @@ class Diamond_Ray_Code():
             ax_ray.legend(loc='upper right', fontsize=8)
 
             plt.tight_layout()
-            plt.savefig(os.path.join(self.save_dir, 'ray_paths.png'))
+            plt.savefig(os.path.join(self.save_dir, 'ray_paths_1m.png'))
 
         # Range-Dependent SSP
         else:
@@ -601,6 +683,7 @@ class Diamond_Ray_Code():
             # Colorbar
             cbar = fig.colorbar(im, ax=ax_ssp, location='right')
             cbar.set_label('c (m/s)')
+            
             plt.savefig(os.path.join(self.save_dir, 'ray_paths.png'), Resolution=300)
 
         output_file = os.path.join(self.save_dir, "ray.mat")
@@ -638,6 +721,7 @@ class Diamond_Ray_Code():
 
         # Distance Travelled
         s_closest = s[idx]
+        arrival_t = time[idx]
         
         # Reflection Product
         R_total = 1.0
@@ -648,10 +732,57 @@ class Diamond_Ray_Code():
         # c_local = self.c0  # or interpolate SSP if range-dependent
         # k = 2*np.pi*self.freq / c_local
 
-        p = np.real(R_total * (1 / s_closest) * np.exp(self.water_atten * s_closest) * 10 ** (self.source_level / 20))
+        p = np.real(R_total * (1 / s_closest) * np.exp(-self.water_atten * s_closest) * 10 ** (self.source_level / 20))
         print(f"Pressure: {p} uPa, {20*np.log10(np.abs(p))} dB, Distance Travelled: {s_closest} m, Bounces: {r_hist}")
 
-        return p
+        return p, arrival_t
+    
+
+    def coherent_pressure(self, p_list, arrivals):
+
+        p_list = np.asarray(p_list)
+        arrivals = np.asarray(arrivals)
+
+        # Align arrivals to earliest arrival
+        t0 = np.min(arrivals)
+        arrivals = arrivals - t0
+
+        signal = self.signal
+        t_signal = self.signal_time
+
+        dt = t_signal[1] - t_signal[0]
+
+        # Maximum delay in samples
+        max_delay = int(np.ceil(np.max(arrivals) / dt))
+
+        out_len = len(signal) + max_delay
+        total_signal = np.zeros(out_len)
+
+        for i in range(len(p_list)):
+
+            amp = p_list[i]
+            delay = int(np.round(arrivals[i] / dt))
+
+            total_signal[delay:delay + len(signal)] += amp * signal
+
+        # Number of samples in first 1 second
+        fs = 1 / dt
+        n_rms = int(fs * 1.0)
+
+        # Ensure we don't exceed array bounds
+        n_rms = min(n_rms, len(total_signal))
+
+        p_rms = np.sqrt(np.mean(total_signal[:n_rms]**2))
+        rl = 20*np.log10(p_rms)
+
+        print(f"Pressure (RMS): {p_rms} uPa, Receiver Level: {rl} dB")
+
+        # plt.plot(total_signal)
+        # plt.show()
+
+
+
+        return p_rms, total_signal
 
 
     def plot_eigenrays(self, eigen_list):
@@ -668,6 +799,8 @@ class Diamond_Ray_Code():
         ray_data = {}
         p_total = 0.0
 
+        p_list = []
+        arrivals = []
         for theta0 in eigen_list:
 
             if theta0 is None:
@@ -679,7 +812,11 @@ class Diamond_Ray_Code():
                 theta0,
                 r_max=r_max
             )
-            p = self.pressure_at_zr(theta0=theta0)
+            p, arrival_t = self.pressure_at_zr(theta0=theta0)
+
+            p_list.append(p)
+            arrivals.append(arrival_t)
+
             p_total += np.abs(p)
 
             # Store eigenray data
@@ -700,6 +837,9 @@ class Diamond_Ray_Code():
                 lw=2.5,
                 label=f"{theta0:.3f}°"
             )
+
+        # Coherent Pressure
+        p_rms, total_signal = self.coherent_pressure(p_list, arrivals)
 
         # Bathymetry
         if self.bty_ranges is not None:
@@ -751,30 +891,73 @@ class Diamond_Ray_Code():
             "source_depth": self.source_depth,
             "receiver_depth": self.receiver_depth,
             "receiver_range": self.receiver_range,
-            "ray_data": ray_data
+            "ray_data": ray_data,
+            "total_signal": total_signal,
+            "p_rms": p_rms
         })
 
         print(f"Eigenray data saved to {output_file}")
 
 
+def gen_waveform(sample_freq,
+                             start_freq_khz,
+                             stop_freq_khz,
+                             duration_ms,
+                             percent_taper):
+
+    # Convert units
+    fs = sample_freq
+    f0 = start_freq_khz * 1000
+    f1 = stop_freq_khz * 1000
+    T = duration_ms / 1000
+
+    # Time vector
+    t = np.arange(0, T, 1/fs)
+
+    # Linear chirp
+    pulse = chirp(t, f0=f0, f1=f1, t1=T, method='linear')
+
+    # Taper window (Tukey)
+    alpha = percent_taper / 100
+    window = windows.tukey(len(pulse), alpha)
+
+    pulse = pulse * window
+
+    return pulse, t
+
 if __name__ == "__main__":
-    data_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/data_files_ssp_long'
+    data_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/data_files'
     ssp_file = os.path.join(data_dir, 'ssp.mat')
     bty_file = os.path.join(data_dir, 'bty.mat')
     ati_file = os.path.join(data_dir, 'ati.mat')
     source_level = 195 # dB re 1 μPa @ 1 m
     freq = 3500 # Hz
-    angle_min, angle_max = -50, 50
+    angle_min, angle_max = -35, 35
     angle_precision = 1
     source_depth = 33
-    receiver_range = None # Meters (m)
-    receiver_depth = 55
-    water_prop = (1026, 0.1)  # density (kg/m^3), attenuation (dB/m kHz)
-    bottom_prop = (2000, 3000, 0.2)  # density (kg/m^3), sound speed (m/s), attenuation ()
-    surface_prop = (200, 350, 0.1) # density (kg/m^3), sound speed (m/s), attenuation ()
-    lon_start, lon_end = -122.8, -122.85
-    lat_start, lat_end = 47.78, 47.71
+    # receiver_range = 5400 # Meters (m)
+    receiver_depth = 25
+    water_prop = (1026, 1e-9)  # density (kg/m^3), attenuation (dB/m kHz)
+    bottom_prop = (2000, 3000, 1e-6)  # density (kg/m^3), sound speed (m/s), attenuation (Np/m)
+    surface_prop = (200, 350, 1e-3) # density (kg/m^3), sound speed (m/s), attenuation (Np/m)
+    lon_start, lon_end = -122.8, -122.84
+    lat_start, lat_end = 47.78, 47.73
     num_points = 1000
+
+    # Data for signal
+    sample_freq = 80000
+    desired_pulse_start_freq_khz = 3.450
+    desired_pulse_stop_freq_khz = 3.550
+    desired_pulse_duration_ms = 1000
+    percent_taper = 10
+
+    signal, time_s = gen_waveform(
+        sample_freq,
+        desired_pulse_start_freq_khz,
+        desired_pulse_stop_freq_khz,
+        desired_pulse_duration_ms,
+        percent_taper
+    )
 
     # Run Ray Tracing
     ray = Diamond_Ray_Code(ssp_file=ssp_file, 
@@ -784,7 +967,7 @@ if __name__ == "__main__":
                            angle_max=angle_max, 
                            angle_precision=angle_precision,
                            source_depth=source_depth, 
-                           receiver_range=receiver_range,
+                           receiver_range=None,
                            receiver_depth=receiver_depth,
                            bottom_prop=bottom_prop,
                            surface_prop=surface_prop,
@@ -796,8 +979,31 @@ if __name__ == "__main__":
                            num_points=num_points,
                            bty_file=bty_file, 
                            ati_file=ati_file,
+                           signal=signal,
+                           signal_time=time_s,
                            save_dir=data_dir)
     
+    # bty_ranges = np.arange(0, 5400+0.01, 0.01)
+    # bty_depths = np.ones_like(bty_ranges)*200
+    # ray.bty_ranges = bty_ranges
+    # ray.bty_depths = bty_depths
+    # ray.bty_interp = interp1d(
+    #     ray.bty_ranges,
+    #     ray.bty_depths,
+    #     bounds_error=False,
+    #     fill_value="extrapolate"
+    # )
+    # dz_dr = np.gradient(ray.bty_depths, ray.bty_ranges)
+    # ray.dbty_dr_interp = interp1d(
+    #     ray.bty_ranges,
+    #     dz_dr,
+    #     bounds_error=False,
+    #     fill_value="extrapolate"
+    # )
+    # ray.angles = [1.79, 1.03, 4.47, 7.41, -1.64]
+
     # ray.ray_fan()
     eigen_list = ray.eigenrays()
     ray.plot_eigenrays(eigen_list)
+
+    # ray.plot_ray_fan()
