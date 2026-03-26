@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 from scipy.interpolate import interp1d, RegularGridInterpolator
+from transmit_sig import *
 
 class Diamond_ARL():
     def __init__(self, 
@@ -77,25 +78,20 @@ class Diamond_ARL():
         if self.angle_min is not None and self.angle_max is not None:
             self.angles = np.arange(self.angle_min, self.angle_max + 1, 1)
 
+
     def read_ssp(self):
         ssp_data = loadmat(self.ssp_file)
 
         ssp = ssp_data['ssp']
         ssp_depths = ssp_data['ssp_depths'].flatten()
 
-        # -------------------------
-        # Single profile
-        # -------------------------
+        # Range-Independent SSP
         if ssp.ndim == 1 or ssp.shape[0] == 1:
             ssp = np.atleast_1d(ssp).flatten()
             return [[ssp_depths[i], ssp[i]] for i in range(len(ssp))]
 
-        # -------------------------
-        # Along-track profile
-        # -------------------------
+        # Range-Dependent SSP
         ssp_ranges = ssp_data['ssp_ranges'].flatten() 
-
-        # Ensure orientation = (depths, ranges)
         if ssp.shape[0] != len(ssp_depths):
             ssp = ssp.T
 
@@ -107,6 +103,7 @@ class Diamond_ARL():
 
         return ssp_df
     
+
     def read_bty(self):
         if self.bty_file is None:
             return None, None
@@ -152,9 +149,74 @@ class Diamond_ARL():
 
         return bty_export, max_range, max_depth
     
+    
+    def compute_s_t(self, ray):
+        ssp = self.ssp
+        ssp_z = []
+        ssp_c = []
+        for i in range(len(ssp)):
+            ssp_i = ssp[i]
+            ssp_z.append(ssp_i[0])
+            ssp_c.append(ssp_i[1])
+        ssp_func = interp1d(ssp_z, ssp_c, fill_value="extrapolate")
+
+        r = ray[:, 0]
+        z = ray[:, 1]
+
+        total_time = 0.0
+        total_dist = 0.0
+
+        # Loop through segments
+        for i in range(len(r) - 1):
+            dr = r[i+1] - r[i]
+            dz = z[i+1] - z[i]
+
+            ds = np.sqrt(dr**2 + dz**2)
+            z_mid = 0.5 * (z[i] + z[i+1])
+
+            c = float(ssp_func(z_mid))
+
+            total_time += ds / c
+            total_dist += ds
+
+        # Attach to DataFrame
+        return total_time, total_dist
+
+
+    def get_bounce_sequence(self, ray, env, tol=1.0):
+        r = ray[:, 0]
+        z = ray[:, 1]
+
+        # Bathymetry at ray ranges
+        depth = np.array(env['depth'])
+        bathy_func = interp1d(depth[:,0], depth[:,1], fill_value="extrapolate")
+        z_bottom = bathy_func(r)
+
+        sequence = []
+        in_surface = False
+        in_bottom = False
+
+        for i in range(len(z)):
+            # Surface check (z ≈ 0)
+            if abs(z[i]) <= tol:
+                if not in_surface:
+                    sequence.append(0)  # surface bounce
+                    in_surface = True
+            else:
+                in_surface = False
+
+            # Bottom check (z ≈ bathy)
+            if abs(z[i] - z_bottom[i]) <= tol:
+                if not in_bottom:
+                    sequence.append(1)  # bottom bounce
+                    in_bottom = True
+            else:
+                in_bottom = False
+
+        return sequence
+
+
     def eigenray(self):
-        rx_depths = np.array([self.receiver_depth, self.receiver_depth + 0.01], dtype=float)
-        rx_ranges = np.array([self.max_range, self.max_range], dtype=float)
 
         env = pm.create_env2d(
             depth=self.bty,
@@ -164,90 +226,106 @@ class Diamond_ARL():
             bottom_density=self.bottom_density,
             bottom_absorption=self.bottom_atten,
             tx_depth=self.source_depth,
-            rx_depth=rx_depths,
-            rx_range=rx_ranges,
+            rx_depth=self.receiver_depth,
+            rx_range=self.max_range,
             min_angle=self.angle_min,
             max_angle=self.angle_max,
             frequency=self.freq
         )
-
-        # bathy = [
-        #     [0, 30],    # 30 m water depth at the transmitter
-        #     [5000, 30],  # 20 m water depth 300 m away
-        #     [10000, 30]  # 25 m water depth at 10 km
-        # ]
-
-        # ssp = [
-        #     [ 0, 1540],  # 1540 m/s at the surface
-        #     [10, 1530],  # 1530 m/s at 10 m depth
-        #     [20, 1532],  # 1532 m/s at 20 m depth
-        #     [25, 1533],  # 1533 m/s at 25 m depth
-        #     [30, 1540]   # 1540 m/s at the seabed
-        # ]
-
-        # env = pm.create_env2d(
-        #     depth=bathy,
-        #     soundspeed=ssp,
-        #     bottom_soundspeed=1450,
-        #     bottom_density=1200,
-        #     bottom_absorption=1.0,
-        #     tx_depth=15,
-        #     rx_depth=15,
-        #     rx_range=10000
-        # )
-
-        # return env
+        rays = pm.compute_eigenrays(env)
+        return env, rays
     
-    def plot_rays(self, rays, env=None, invert_colors=False, figsize=(10,6)):
+
+    def unique_eigenrays(self, rays, env, num_rays=10, tol=1):
 
         if rays is None or len(rays) == 0:
             print("No rays to plot.")
             return
 
+        selected_ray_idxs = []
+        
+        for index, (_, row) in enumerate(rays.iterrows()):
+            r = row.ray[:, 0]
+            z = row.ray[:, 1]
+
+            r_idx = np.argmin(np.abs(r - self.max_range))
+            z_rr = z[r_idx]
+
+            if np.abs(z_rr - self.receiver_depth) <= tol:
+                selected_ray_idxs.append(index)
+
+        if len(selected_ray_idxs) == 0:
+            print("No rays hit receiver within tolerance.")
+            return
+
+        # Filter + sort
+        selected = rays.iloc[selected_ray_idxs].copy()
+        selected = selected.sort_values('bottom_bounces', ascending=True)
+
+        unique_indices = []
+        seen_sequences = []
+
+        travel_times = []
+        path_lengths = []
+
+        for index, (_, row) in enumerate(selected.iterrows()):
+            b_seq = self.get_bounce_sequence(row.ray, env)
+
+            total_time, total_dist = self.compute_s_t(row.ray)
+
+            # Store values separately
+            travel_times.append(total_time)
+            path_lengths.append(total_dist)
+
+            if b_seq not in seen_sequences:
+                seen_sequences.append(b_seq)
+                unique_indices.append(index)
+
+        # Attach computed values
+        selected['travel_time'] = travel_times
+        selected['path_length'] = path_lengths
+
+        # Select unique rays
+        unique = selected.iloc[unique_indices]
+
+        # Final sorting
+        unique = unique.sort_values('bottom_bounces', ascending=True).head(num_rays)
+
+        return unique
+
+    
+    def plot_eigenrays(self, unique, save_file, figsize=(10,6)):
+
         fig, ax = plt.subplots(figsize=figsize)
 
-        # Sort so highest bounce rays plot first
-        rays = rays.sort_values('bottom_bounces', ascending=False)
-
-        max_bounce = np.max(np.abs(rays.bottom_bounces)) if len(rays.bottom_bounces) > 0 else 1
-        if max_bounce == 0:
-            max_bounce = 1
-
-        # Determine if we should plot in km
-        all_ranges = np.concatenate([row.ray[:,0] for _, row in rays.iterrows()])
-        divisor = 1
-        xlabel = 'Range (m)'
-        if np.max(all_ranges) - np.min(all_ranges) > 10000:
-            divisor = 1000
-            xlabel = 'Range (km)'
-
         # Plot rays
-        for _, row in rays.iterrows():
-            intensity = abs(row.bottom_bounces) / max_bounce
-            gray = 1 - intensity if invert_colors else intensity
-            color = (gray, gray, gray)
-
-            ax.plot(row.ray[:,0]/divisor,
+        for _, row in unique.iterrows():
+            ax.plot(row.ray[:,0] / 1000,
                     row.ray[:,1],
-                    color=color,
-                    linewidth=1)
+                    linewidth=1.5)
+        
+        # Plot Source and Receiver
+        ax.plot(0, self.source_depth, 'bo', label="Source")
+        ax.plot(self.max_range / 1000, self.receiver_depth, 'ro', label="Receiver")
 
-        # Overlay bathymetry if available
+        # Bathymetry
         if env is not None and 'depth' in env:
             depth = np.array(env['depth'])
-            ranges = depth[:,0] / divisor
+            ranges = depth[:,0] / 1000
             depths = depth[:,1]
             ax.plot(ranges, depths, color='black', linewidth=2)
 
-        ax.set_xlabel(xlabel)
+        ax.set_xlabel('Range (km)')
         ax.set_ylabel('Depth (m)')
-        ax.set_title('Ray Paths')
+        ax.set_title('Eigenrays')
         ax.grid(True)
         ax.invert_yaxis()
-
+        ax.legend()
         plt.tight_layout()
+        plt.savefig(save_file)
         plt.show()
     
+
     def coherent_tl(self):
         env = pm.create_env2d(
             depth=self.bty,
@@ -264,37 +342,6 @@ class Diamond_ARL():
             nbeams=self.num_beams)
 
         return env
-
-        # bathy = [
-        #     [0, 30],    # 30 m water depth at the transmitter
-        #     [5000, 30],  # 20 m water depth 300 m away
-        #     [10000, 30]  # 25 m water depth at 10 km
-        # ]
-
-        # ssp = [
-        #     [ 0, 1540],  # 1540 m/s at the surface
-        #     [10, 1530],  # 1530 m/s at 10 m depth
-        #     [20, 1532],  # 1532 m/s at 20 m depth
-        #     [25, 1533],  # 1533 m/s at 25 m depth
-        #     [30, 1540]   # 1540 m/s at the seabed
-        # ]
-
-        # env = pm.create_env2d(
-        #     depth=bathy,
-        #     soundspeed=ssp,
-        #     frequency=self.freq,
-        #     bottom_soundspeed=1450,
-        #     bottom_density=1200,
-        #     bottom_absorption=1.0,
-        #     tx_depth=15,
-        #     rx_depth=15,
-        #     rx_range=10000
-        # )
-
-        # env['rx_range'] = np.linspace(0, 10000, 10001)
-        # env['rx_depth'] = np.linspace(0, 30, 301)
-
-        # return env
     
 
     def plot_pressure_level(self, tloss, env=None):
@@ -368,53 +415,113 @@ class Diamond_ARL():
     
     
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
-    # Set the Path to Include Bellhop
+#     # Set the Path to Include Bellhop
+#     models_path = "/Users/justindiamond/Documents/Documents/UW-APL/Research/Models"
+#     os.environ["PATH"] = f"{models_path}:{os.environ['PATH']}"
+
+#     # Data Files and Parameters
+#     data_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/data_files'
+#     ssp_file = os.path.join(data_dir, 'ssp.mat')
+#     bty_file = os.path.join(data_dir, 'bty.mat')
+#     ati_file = os.path.join(data_dir, 'ati.mat')
+#     source_level = 195 # dB re 1 μPa @ 1 m
+#     freq = 25000 # Hz
+#     angle_min, angle_max = -80, 80 # degrees
+#     source_depth = 33
+#     receiver_depth = 55
+#     water_prop = (1026, 0.1)  # density (kg/m^3), attenuation (dB/m kHz)
+#     bottom_prop = (2000, 1500, 0.5)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
+#     surface_prop = (1000, 350, 0.1) # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
+#     lon_start, lon_end = -122.8, -122.85
+#     lat_start, lat_end = 47.78, 47.71
+#     num_points = 50
+
+#     # Run Ray Tracing
+#     run = Diamond_ARL(ssp_file=ssp_file, 
+#                       freq=freq,
+#                       source_level=source_level,
+#                       angle_min=angle_min, 
+#                       angle_max=angle_max, 
+#                       source_depth=source_depth, 
+#                       receiver_depth=receiver_depth,
+#                       bottom_prop=bottom_prop,
+#                       surface_prop=surface_prop,
+#                       water_prop=water_prop,
+#                       lon_start=lon_start,
+#                       lon_end=lon_end,
+#                       lat_start=lat_start,
+#                       lat_end=lat_end,
+#                       num_points=num_points,
+#                       bty_file=bty_file, 
+#                       ati_file=ati_file,
+#                       save_dir=data_dir)
+    
+#     # env = run.eigenray()
+#     # rays = pm.compute_eigenrays(env)
+#     # run.plot_rays(rays, env=env)
+
+#     env = run.coherent_tl()
+#     rays = pm.compute_transmission_loss(env)
+#     run.plot_pressure_level(rays, env=env)
+
+if __name__ == "__main__":
+    # Paths
     models_path = "/Users/justindiamond/Documents/Documents/UW-APL/Research/Models"
     os.environ["PATH"] = f"{models_path}:{os.environ['PATH']}"
 
-    # Data Files and Parameters
     data_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/data_files'
-    ssp_file = os.path.join(data_dir, 'ssp.mat')
     bty_file = os.path.join(data_dir, 'bty.mat')
-    ati_file = os.path.join(data_dir, 'ati.mat')
-    source_level = 195 # dB re 1 μPa @ 1 m
-    freq = 25000 # Hz
-    angle_min, angle_max = -80, 80 # degrees
-    source_depth = 33
+    ssp_file = os.path.join(data_dir, 'ssp.mat')
+    save_file_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/Bellhop_Plots'
+    save_file = 'eigenray_arms_ssp_bty.png'
+
+    # Acoustic Properties
+    ssp_depths = np.linspace(0, 200, 201)
+    ssp = np.ones(len(ssp_depths)) * 1500
+    num_points = 551
+    bty_ranges = np.linspace(0, 5500, num_points)
+    bty_depths = np.ones(len(bty_ranges)) * 200
+    source_level = 195
+    freq = 3500
+    angle_min, angle_max = -40, 40
+    source_depth = 35
     receiver_depth = 55
-    water_prop = (1026, 0.1)  # density (kg/m^3), attenuation (dB/m kHz)
-    bottom_prop = (2000, 1500, 0.5)  # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
-    surface_prop = (1000, 350, 0.1) # density (kg/m^3), sound speed (m/s), attenuation (dB/m kHz)
-    lon_start, lon_end = -122.8, -122.85
-    lat_start, lat_end = 47.78, 47.71
-    num_points = 50
+    water_prop = (1026, 0.0)
+    bottom_prop = (2000, 3000, 0.0)
+    lon_start, lon_end = -122.8, -122.84
+    lat_start, lat_end = 47.78, 47.73
 
-    # Run Ray Tracing
-    run = Diamond_ARL(ssp_file=ssp_file, 
-                      freq=freq,
-                      source_level=source_level,
-                      angle_min=angle_min, 
-                      angle_max=angle_max, 
-                      source_depth=source_depth, 
-                      receiver_depth=receiver_depth,
-                      bottom_prop=bottom_prop,
-                      surface_prop=surface_prop,
-                      water_prop=water_prop,
-                      lon_start=lon_start,
-                      lon_end=lon_end,
-                      lat_start=lat_start,
-                      lat_end=lat_end,
-                      num_points=num_points,
-                      bty_file=bty_file, 
-                      ati_file=ati_file,
-                      save_dir=data_dir)
-    
-    # env = run.eigenray()
-    # rays = pm.compute_eigenrays(env)
-    # run.plot_rays(rays, env=env)
+    # BELLHOP
+    arlpy = Diamond_ARL()
+    # arlpy.ssp = [[ssp_depths[i], ssp[i]] for i in range(len(ssp_depths))]
+    arlpy.ssp_file = ssp_file
+    arlpy.ssp = arlpy.read_ssp()
+    arlpy.bty_file = bty_file
+    arlpy.source_level = source_level
+    arlpy.freq = freq
+    arlpy.angle_min = angle_min
+    arlpy.angle_max = angle_max
+    arlpy.source_depth = source_depth
+    arlpy.receiver_depth = receiver_depth
+    arlpy.bottom_density = bottom_prop[0]
+    arlpy.bottom_ss = bottom_prop[1]
+    arlpy.bottom_atten = bottom_prop[2]
+    arlpy.water_density = water_prop[0]
+    arlpy.water_atten = water_prop[1]
+    arlpy.lon_start = lon_start
+    arlpy.lon_end = lon_end
+    arlpy.lat_start = lat_start
+    arlpy.lat_end = lat_end
+    arlpy.range_points = 1000
+    arlpy.depth_points = 5500
+    arlpy.num_points = num_points
+    # arlpy.bty, arlpy.max_range, arlpy.max_depth = [[bty_ranges[i], bty_depths[i]] for i in range(len(bty_ranges))], max(bty_ranges), max(bty_depths)
+    arlpy.bty, arlpy.max_range, arlpy.max_depth = arlpy.read_bty()
+    arlpy.angles = np.arange(angle_min, angle_max + 0.01, 0.01)
+    arlpy.num_beams = len(arlpy.angles)
 
-    env = run.coherent_tl()
-    rays = pm.compute_transmission_loss(env)
-    run.plot_pressure_level(rays, env=env)
+    env, rays = arlpy.eigenray()
+    unique = arlpy.unique_eigenrays(rays, env=env)
+    arlpy.plot_eigenrays(unique, save_file=os.path.join(save_file_dir, save_file))
