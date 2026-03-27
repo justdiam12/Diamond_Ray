@@ -12,22 +12,25 @@ if __name__ == "__main__":
     data_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/data_files'
     bty_file = os.path.join(data_dir, 'bty.mat')
     ssp_file = os.path.join(data_dir, 'ssp.mat')
+    save_file_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/Bellhop_PyRAM'
+#     save_file = 'bellhop_pyram_arms_bty_isovel.png'
+    save_file = 'arms_ssp.png'
 
     # Acoustic Properties
     ssp_depths = np.linspace(0, 200, 201)
     ssp = np.ones(len(ssp_depths)) * 1500
-    bty_ranges = np.linspace(0, 10000, 1001)
+    num_points = 551
+    bty_ranges = np.linspace(0, 5500, num_points)
     bty_depths = np.ones(len(bty_ranges)) * 200
     source_level = 195
     freq = 3500
-    angle_min, angle_max = -30, 30
-    source_depth = 25
+    angle_min, angle_max = -40, 40
+    source_depth = 35
     receiver_depth = 55
-    water_prop = (1026, 0.1)
-    bottom_prop = (2000, 3000, 0.2)
+    water_prop = (1026, 0.0)
+    bottom_prop = (2000, 3000, 0.0)
     lon_start, lon_end = -122.8, -122.84
     lat_start, lat_end = 47.78, 47.73
-    num_points = 85
 
     # PYRAM 
     pyram = Diamond_PyRAM()
@@ -49,6 +52,20 @@ if __name__ == "__main__":
     pyram.lat_start = lat_start
     pyram.lat_end = lat_end
     pyram.num_points = num_points
+    
+#     plt.figure(figsize=(4,10))
+#     plt.plot(pyram.ssp, pyram.ssp_depths, linewidth=2)
+#     plt.xlabel("Sound Speed (m/s)")
+#     plt.ylabel("Depth (m)")
+#     plt.title("ARMS Sound Speed Profile")
+#     ax=plt.gca()
+#     ax.invert_yaxis()
+#     plt.xticks(rotation=45)
+#     plt.savefig(os.path.join(save_file_dir, save_file), dpi=200, 
+#             bbox_inches='tight',
+#             pad_inches=0)
+#     plt.show()
+
     pyram.rbzb = np.column_stack((bty_ranges, bty_depths))
     pyram.rbzb = pyram.read_bty()
     pyram_model = pyram.create_model(dr=0.5)
@@ -61,8 +78,8 @@ if __name__ == "__main__":
     # BELLHOP
     arlpy = Diamond_ARL()
     arlpy.ssp = [[ssp_depths[i], ssp[i]] for i in range(len(ssp_depths))]
-    arlpy.ssp_file = ssp_file
-    arlpy.ssp = arlpy.read_ssp()
+#     arlpy.ssp_file = ssp_file
+#     arlpy.ssp = arlpy.read_ssp()
     arlpy.bty_file = bty_file
     arlpy.source_level = source_level
     arlpy.freq = freq
@@ -81,9 +98,9 @@ if __name__ == "__main__":
     arlpy.range_points = len(pyram_ranges)
     arlpy.depth_points = len(pyram_depths)
     arlpy.num_points = num_points
-    arlpy.bty, arlpy.max_range, arlpy.max_depth = [[bty_ranges[i], bty_depths[i]] for i in range(len(bty_ranges))], max(bty_ranges), max(bty_depths)
+#     arlpy.bty, arlpy.max_range, arlpy.max_depth = [[bty_ranges[i], bty_depths[i]] for i in range(len(bty_ranges))], max(bty_ranges), max(bty_depths)
     arlpy.bty, arlpy.max_range, arlpy.max_depth = arlpy.read_bty()
-    arlpy.angles = np.arange(angle_min, angle_max + 1, 0.1)
+    arlpy.angles = np.arange(angle_min, angle_max + 0.001, 0.001)
     arlpy.num_beams = len(arlpy.angles)
 
     env = arlpy.coherent_tl()
@@ -95,7 +112,7 @@ if __name__ == "__main__":
     arlpy_depths = env['rx_depth']
 
     # FIGURE 
-    fig = plt.figure(figsize=(18,8))
+    fig = plt.figure(figsize=(16,10))
     gs = fig.add_gridspec(2, 2, width_ratios=[2, 1])
 
     ax1 = fig.add_subplot(gs[0,0])
@@ -113,8 +130,7 @@ if __name__ == "__main__":
                      cmap=cmap, vmin=100, vmax=150)
     ax1.set_ylabel("Depth (m)")
     ax1.set_title("PYRAM Result")
-    plt.colorbar(im1, ax=ax1, label="Pressure Level (dB)")
-
+    plt.colorbar(im1, ax=ax1, label="Pressure Level (dB re 1 µPa)")
     # BELLHOP FIELD 
     im2 = ax2.imshow(arlpl,
                      extent=[arlpy_ranges.min(), arlpy_ranges.max(),
@@ -124,7 +140,7 @@ if __name__ == "__main__":
     ax2.set_xlabel("Range (km)")
     ax2.set_ylabel("Depth (m)")
     ax2.set_title("Bellhop Result")
-    plt.colorbar(im2, ax=ax2, label="Pressure Level (dB)")
+    plt.colorbar(im2, ax=ax2, label="Pressure Level (dB re 1 µPa)")
 
     # Depth at Final Range
     pyram_slice = pyram_pl[:, -1]
@@ -133,12 +149,12 @@ if __name__ == "__main__":
     ax3.plot(pyram_slice, pyram_depths, label="PYRAM", linewidth=2)
     ax3.plot(arl_slice, arlpy_depths, label="Bellhop", linewidth=2)
     ax3.invert_yaxis()
-    ax3.set_xlabel("Pressure Level (dB)")
+    ax3.set_xlabel("Pressure Level (dB re 1 µPa)")
     ax3.set_ylabel("Depth (m)")
     ax3.set_title("Final Range Depth Slice")
-    ax3.set_xlim(100,140)
+    ax3.set_xlim(100,150)
     ax3.legend()
 
     plt.tight_layout()
-    plt.savefig('pyram_vs_bellhop.png', dpi=300)
+    plt.savefig(os.path.join(save_file_dir, save_file), dpi=200)
     plt.show()
