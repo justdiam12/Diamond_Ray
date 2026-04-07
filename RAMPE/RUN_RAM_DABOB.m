@@ -25,7 +25,7 @@ RR = RNG(end);    %Receiver Range
 dz =  .05;    %Depth Grid Spacing
 dr =  .05;    %Range Grid Spacing 
 ndr = 20;     %Number of Range Outputs
-ndz = 200;     %Number of Depth Outputs
+ndz = 20;     %Number of Depth Outputs
 
 cw = cw;
 zw = zw;
@@ -75,6 +75,9 @@ readPEsstVECTOR
 imagesc(Range,Depth+za(1),20*log10(abs(P)))
 ylim([-20 200]);caxis([-80 -40])
 drawnow
-Psv(:,:,fdex)=P;
+
+z = Depth+za(1);
+zdex = find(Depth>-10&Depth<200);
+Psv(:,:,freqdex)=P(zdex,:);
 
 end
