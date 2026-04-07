@@ -187,33 +187,53 @@ class Diamond_ARL():
         r = ray[:, 0]
         z = ray[:, 1]
 
-        # Bathymetry at ray ranges
-        depth = np.array(env['depth'])
-        bathy_func = interp1d(depth[:,0], depth[:,1], fill_value="extrapolate")
+        # Bathymetry
+        bty = self.bty
+        bty_z = []
+        bty_r = []
+        for i in range(len(bty)):
+            bty_i = bty[i]
+            bty_r.append(bty_i[0])
+            bty_z.append(bty_i[1])
+        bathy_func = interp1d(bty_r, bty_z, fill_value="extrapolate")
         z_bottom = bathy_func(r)
 
         sequence = []
+        reflection_coeffs = []
+
         in_surface = False
         in_bottom = False
 
+        # Determine Reflection Coefficient
+        rho_w = self.water_density
+        c_w   = self.ssp[0][1]  
+        rho_b = self.bottom_density
+        c_b   = self.bottom_ss 
+        Z_w = rho_w * c_w
+        Z_b = rho_b * c_b
+        R_bottom = (Z_b - Z_w) / (Z_b + Z_w)
+
         for i in range(len(z)):
-            # Surface check (z ≈ 0)
+
+            # Surface bounce (pressure release)
             if abs(z[i]) <= tol:
                 if not in_surface:
-                    sequence.append(0)  # surface bounce
+                    sequence.append(0)
+                    reflection_coeffs.append(-1.0)  # phase inversion
                     in_surface = True
             else:
                 in_surface = False
 
-            # Bottom check (z ≈ bathy)
+            # Bottom bounce
             if abs(z[i] - z_bottom[i]) <= tol:
                 if not in_bottom:
-                    sequence.append(1)  # bottom bounce
+                    sequence.append(1)
+                    reflection_coeffs.append(R_bottom)
                     in_bottom = True
             else:
                 in_bottom = False
 
-        return sequence
+        return sequence, reflection_coeffs
 
 
     def eigenray(self):
@@ -267,15 +287,18 @@ class Diamond_ARL():
 
         travel_times = []
         path_lengths = []
+        r_totals = []
 
         for index, (_, row) in enumerate(selected.iterrows()):
-            b_seq = self.get_bounce_sequence(row.ray, env)
+            b_seq, r_coeffs = self.get_bounce_sequence(row.ray, env)
+            r_total = np.prod(r_coeffs)
 
             total_time, total_dist = self.compute_s_t(row.ray)
 
             # Store values separately
             travel_times.append(total_time)
             path_lengths.append(total_dist)
+            r_totals.append(r_total)
 
             if b_seq not in seen_sequences:
                 seen_sequences.append(b_seq)
@@ -284,6 +307,7 @@ class Diamond_ARL():
         # Attach computed values
         selected['travel_time'] = travel_times
         selected['path_length'] = path_lengths
+        selected['r_total'] = r_totals
 
         # Select unique rays
         unique = selected.iloc[unique_indices]
@@ -292,6 +316,61 @@ class Diamond_ARL():
         unique = unique.sort_values('bottom_bounces', ascending=True).head(num_rays)
 
         return unique
+
+
+    def p_at_depth(self, unique, date=21, save_file=None):
+        p_total = 0.0
+        signal, t = generate_arms_waveform(date)
+        dt = t[1] - t[0]
+
+        # Arrival Times
+        arrivals = unique['travel_time'].values
+        t0 = np.min(arrivals)
+        rel_arrivals = arrivals - t0
+        max_delay = np.max(rel_arrivals)
+        total_duration = max_delay + t[-1]
+        n_samples = int(np.ceil(total_duration / dt)) + 1
+        total_signal = np.zeros(n_samples)
+
+        time_axis = np.arange(0, n_samples) * dt + t0
+        for _, row in unique.iterrows():
+
+            s = row['path_length']
+            tau = row['travel_time'] - t0  # relative arrival time
+            R = row['r_total']
+
+            # Amplitude scaling
+            A = R * (1 / s) * np.exp(-self.water_atten * s) * 10 ** (self.source_level / 20)
+            p_total += np.abs(A)
+
+            # Time shift index
+            shift_idx = int(np.round(tau / dt))
+            end_idx = shift_idx + len(signal)
+            if end_idx > len(total_signal):
+                end_idx = len(total_signal)
+
+            total_signal[shift_idx:end_idx] += A * signal[:end_idx - shift_idx]
+
+        # Filter the signal
+        t_min = t0 + 0.5
+        t_max = t0 + 0.95
+        mask = (time_axis >= t_min) & (time_axis <= t_max)
+
+        # Extract segment
+        segment = total_signal[mask]
+
+        # RMS calculation
+        p_rms = np.sqrt(np.mean(np.abs(segment)**2))
+        p_rms_dB = 20 * np.log10(p_rms)
+        p_total_dB = 20 * np.log10(p_total)
+
+        print("--------------------")
+        print(f"Peak Pressure: {p_total} µPa, {p_total_dB} dB")
+        print("--------------------")
+        print(f"RMS Pressure: {p_rms} µPa, {p_rms_dB} dB")
+        print("--------------------")
+
+        return p_total, p_rms, total_signal, time_axis
 
     
     def plot_eigenrays(self, unique, save_file, figsize=(10,6)):
@@ -411,7 +490,7 @@ class Diamond_ARL():
             plt.plot(bty_range, bty_depth, 'k', linewidth=2)
 
         plt.tight_layout()
-        plt.show()
+        # plt.show()
     
     
 
@@ -473,9 +552,10 @@ if __name__ == "__main__":
 
     data_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/data_files'
     bty_file = os.path.join(data_dir, 'bty.mat')
-    ssp_file = os.path.join(data_dir, 'ssp.mat')
-    save_file_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/Bellhop_Plots'
-    save_file = 'eigenray_arms_ssp_bty.png'
+    ssp_file = os.path.join(data_dir, 'ssp_smooth.mat')
+    save_file_dir = '/Users/justindiamond/Documents/Documents/UW-APL/Research/Diamond_Ray/Bellhop_Signal_Plots'
+    save_file_1 = 'num_ray_5.png'
+    save_file_2 = 'num_ray_5_signal.png'
 
     # Acoustic Properties
     ssp_depths = np.linspace(0, 200, 201)
@@ -486,12 +566,12 @@ if __name__ == "__main__":
     source_level = 195
     freq = 3500
     angle_min, angle_max = -40, 40
-    source_depth = 35
+    source_depth = 43.5
     receiver_depth = 55
     water_prop = (1026, 0.0)
-    bottom_prop = (2000, 3000, 0.0)
-    lon_start, lon_end = -122.8, -122.84
-    lat_start, lat_end = 47.78, 47.73
+    bottom_prop = (2000, 2000, 0.0)
+    lon_start, lon_end = -122.802983, -122.84
+    lat_start, lat_end = 47.77295, 47.73
 
     # BELLHOP
     arlpy = Diamond_ARL()
@@ -523,5 +603,15 @@ if __name__ == "__main__":
     arlpy.num_beams = len(arlpy.angles)
 
     env, rays = arlpy.eigenray()
-    unique = arlpy.unique_eigenrays(rays, env=env)
-    arlpy.plot_eigenrays(unique, save_file=os.path.join(save_file_dir, save_file))
+    unique = arlpy.unique_eigenrays(rays, num_rays=5, env=env)
+    p_total, p_rms, total_signal, time_axis = arlpy.p_at_depth(unique)
+    arlpy.plot_eigenrays(unique, save_file=os.path.join(save_file_dir, save_file_1))
+
+
+    plt.figure(figsize=(12,6))
+    plt.plot(time_axis, total_signal)
+    plt.xlabel("Time (s)")
+    plt.ylabel("Pressure (µPa)")
+    plt.title("Received Signal (All Eigenrays)")
+    plt.savefig(os.path.join(save_file_dir, save_file_2))
+    # plt.show()
