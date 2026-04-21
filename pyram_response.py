@@ -2,7 +2,42 @@ from diamond_pyram import *
 import numpy as np
 from matplotlib import pyplot as plt
 import matplotlib.animation as animation
+from scipy.interpolate import interp1d
+from scipy.signal import hilbert
+from transmit_sig import *
 import os
+
+def convolve_time_domain_direct(source_sig, source_time, impulse_sig, impulse_time):
+    """
+    Direct (non-FFT) time-domain convolution.
+
+    Returns:
+        y      : convolved signal
+        t_out  : corresponding time vector
+    """
+
+    # --- Step 1: ensure same sampling ---
+    dt_imp = impulse_time[1] - impulse_time[0]
+    dt_src = source_time[1] - source_time[0]
+
+    if not np.isclose(dt_imp, dt_src):
+        # Resample source onto impulse grid
+        t_src_uniform = np.arange(source_time[0], source_time[-1], dt_imp)
+        interp_func = interp1d(source_time, source_sig,
+                               bounds_error=False, fill_value=0)
+        source_sig = interp_func(t_src_uniform)
+        source_time = t_src_uniform
+
+    dt = dt_imp
+
+    # --- Step 2: direct convolution ---
+    y = np.convolve(source_sig, impulse_sig, mode='full')
+
+    # --- Step 3: output time vector ---
+    t_start = source_time[0] + impulse_time[0]
+    t_out = t_start + np.arange(len(y)) * dt
+
+    return y, t_out
 
 if __name__ == "__main__":
     # --- Paths ---
@@ -23,9 +58,8 @@ if __name__ == "__main__":
     bty_ranges = np.linspace(0, 5500, num_points)
     bty_depths = np.ones(len(bty_ranges)) * 200
     source_level = 195
-    freqs = np.arange(3450, 3551, 1)   # 1 Hz spacing (important!)
+    freqs = np.arange(3495, 3506, 1)   # 1 Hz spacing (important!)
     nf = len(freqs)
-    angle_min, angle_max = -10, 10
     source_depth = 43.5
     receiver_depth = 55
     water_prop = (1026, 0.0)
@@ -40,13 +74,9 @@ if __name__ == "__main__":
 
     # PYRAM 
     pyram = Diamond_PyRAM()
-    # pyram.ssp = ssp
-    # pyram.ssp_depths = ssp_depths
-    # pyram.ssp_ranges = [0]
     pyram.ssp_file = ssp_file
     pyram.ssp, pyram.ssp_depths, pyram.ssp_ranges = pyram.read_ssp()
     pyram.bty_file = bty_file
-    # pyram.freq = freq
     pyram.source_level = source_level
     pyram.source_depth = source_depth
     pyram.receiver_depth = receiver_depth
@@ -58,135 +88,90 @@ if __name__ == "__main__":
     pyram.lat_start = lat_start
     pyram.lat_end = lat_end
     pyram.num_points = num_points
-
-    # pyram.rbzb = np.column_stack((bty_ranges, bty_depths))
     pyram.rbzb = pyram.read_bty()
     receiver_range = pyram.rbzb[-1, 0]
 
     psv = np.zeros_like(freqs, dtype=complex)
-    for f in freqs:
+
+    # Loop through frequencies, run PYRAM, and extract complex pressure at receiver location
+    for f_idx, f in enumerate(freqs):
         print(f"Running frequency {f} Hz")
         pyram.freq = f
         pyram_model = pyram.create_model(dr=0.5)
-        results = pyram_model.run()  # returns complex pressure (nz, nr)
+        results = pyram_model.run()
         z = results['Depths']
         r = results['Ranges']
         z_idx = np.argmin(np.abs(z - receiver_depth))
         r__idx = np.argmin(np.abs(r - receiver_range))  # receiver at range=max_range
-        p = results['CP Grid'][z_idx, r__idx]  # complex pressure at receiver depth and range
-        psv[freqs == f] = p  # store complex field for each frequency
+        psv[f_idx] = results['CP Grid'][z_idx, r__idx] # Relative pressure (complex) at receiver location for this frequency
+    
+    source_sig, source_time = generate_arms_waveform(23)  # Generate source signal (ARMS waveform) for convolution
+    dt_src = source_time[1] - source_time[0]
 
     # Time vector
-    t = np.arange(0, 2.0001, 0.0001)
-
-    # Create exponential matrix: (nfreq, nt)
-    exp_matrix = np.exp(-1j * 2 * np.pi * freqs[:, None] * t[None, :])
+    dt = 0.0001
+    T = 1 / np.min(np.diff(freqs))  
+    time = np.arange(0, 2 * T + dt, dt)
+    sig = np.zeros_like(time, dtype=complex)
+    df = freqs[1] - freqs[0]  # Frequency spacing
 
     # Multiply and sum over frequency axis
-    sig = np.sum(psv[:, None] * exp_matrix, axis=0)
+    for i in range(len(time)):
+        # print(f"Calculating time response at t={time[i]:.4f} s")
+        sig[i] = np.trapz(psv[:] * np.exp(-1j * 2 * np.pi * freqs[:] * time[i]), freqs)
 
-    plt.plot(t, np.abs(sig))
+
+    sig[i] *= df  # Scale by frequency spacing
+    sig = sig[(time >= 0.75) & (time <= 1.25)]
+    time = time[(time >= 0.75) & (time <= 1.25)] + 2.3
+
+    y, t_out = convolve_time_domain_direct(
+    source_sig, source_time,
+    sig, time)
+
+    y = np.real(y) * dt # Back to relative pressure in time domain
+
+
+    # fig, axs = plt.subplots(2, 1, figsize=(14, 7))
+    # axs[0].plot(time, np.abs(sig))
+    # axs[0].set_ylabel("Amplitude")
+    # axs[0].set_title("Windowed Impulse Response at Receiver Location")
+    # axs[1].plot(source_time, source_sig)
+    # axs[1].set_xlabel("Time (s)")
+    # axs[1].set_ylabel("Amplitude")
+    # axs[1].set_title("Source Signal (ARMS LFM 100 Hz)")
+    # plt.savefig(os.path.join(save_file_dir, "time_source_response.png"), dpi=200,
+    #          bbox_inches='tight',
+    #          pad_inches=0)
+    # plt.show()
+
+    y_env = np.abs(hilbert(np.real(y)))
+
+    plt.figure(figsize=(12,4))
+    plt.plot(t_out, np.abs(y), linewidth=1, label='Convolved Signal')
+    plt.plot(t_out, y_env, linewidth=2, label='Envelope')
+    plt.title("Received Signal (Convolved with ARMS Source)")
     plt.xlabel("Time (s)")
-    plt.ylabel("Amplitude")
-    plt.title("Time-Domain Response at Receiver")
-    plt.savefig(os.path.join(save_file_dir, "pyram_time_response.png"), dpi=200,
+    plt.ylabel("Relative Pressure")
+    plt.legend()
+    plt.savefig(os.path.join(save_file_dir, "time_response.png"), dpi=200,
              bbox_inches='tight',
-             pad_inches=0)  
+             pad_inches=0)
     plt.show()
 
-    
-    # # --------------------------
-    # # Run over frequencies
-    # # --------------------------
-    # fields = []
 
-    # for i, f in enumerate(freqs):
-    #     print(f"Running freq {f} Hz ({i+1}/{nf})")
-
-    #     pyram.freq = f
-    #     pyram_model = pyram.create_model(dr=0.5)
-    #     results = pyram_model.run()
-
-    #     # Complex pressure field
-    #     field = results['TL Grid']   # (nz, nr)
-
-    #     # Convert to dB
-    #     pyram_pl = pyram.source_level - field  # TL is subtracted from source level to get PL
-
-    #     fields.append(pyram_pl)
-
-    # # fields: list of 2D arrays (nz_i, nr), possibly differing nz
-    # nf = len(fields)
-
-    # # 1. Trim all fields to the minimum depth dimension
-    # min_nz = min(f.shape[0] for f in fields)
-    # min_nr = min(f.shape[1] for f in fields)
-
-    # fields_trimmed = [f[:min_nz, :min_nr] for f in fields]  # now (min_nz, min_nr)
-    # fields_array = np.stack(fields_trimmed, axis=0)    # shape = (nf, min_nz, nr)
-
-    # # 3. Incoherent sum over frequency
-    # fields_sum = np.sum(fields_array, axis=0)       # shape = (min_nz, nr)
-    # incoherent_avg = fields_sum / nf
-
-    # # Grids
-    # pyram_ranges = results['Ranges'].flatten()
-    # pyram_depths = results['Depths'].flatten()
-
-
-    # # --------------------------
-    # # Create animation
-    # # --------------------------
-    # fig, ax = plt.subplots(figsize=(12, 6))
-
-    # im = ax.imshow(fields[0],
-    #                extent=[pyram_ranges.min(), pyram_ranges.max(),
-    #                        pyram_depths.max(), pyram_depths.min()],
-    #                aspect='auto',
-    #                origin='upper',
-    #                cmap='viridis',
-    #                vmin=100, vmax=150)
-
-    # title = ax.set_title(f"Frequency: {freqs[0]} Hz")
-    # ax.set_xlabel("Range (m)")
-    # ax.set_ylabel("Depth (m)")
-
-    # cbar = plt.colorbar(im, ax=ax, label="Pressure Level (dB re 1 µPa)")
-
-    # # --------------------------
-    # # Update function
-    # # --------------------------
-    # def update(frame):
-    #     im.set_data(fields[frame])
-    #     title.set_text(f"Frequency: {freqs[frame]} Hz")
-    #     return [im, title]
-
-    # # --------------------------
-    # # Animate
-    # # --------------------------
-    # ani = animation.FuncAnimation(
-    #     fig,
-    #     update,
-    #     frames=nf,
-    #     interval=150,   # ms
-    #     blit=False
-    # )
-
-    # plt.tight_layout()
-    # ani.save(os.path.join(save_file_dir, "pyram_f_sweep.mp4"), writer="ffmpeg", fps=10)
-
-    # fig = plt.figure(figsize=(12, 6))
-    # plt.imshow(incoherent_avg,
-    #            extent=[pyram_ranges.min(), pyram_ranges.max(),
-    #                    pyram_depths.max(), pyram_depths.min()],
-    #            aspect='auto',
-    #            origin='upper',
-    #            cmap='viridis',
-    #            vmin=100, vmax=150)
-    # plt.colorbar(label="Pressure Level (dB re 1 µPa)")
-    # plt.xlabel("Range (m)")
-    # plt.ylabel("Depth (m)")
-    # plt.title("Incoherent Sum over Frequencies")
-    # plt.tight_layout()
-    # plt.savefig(os.path.join(save_file_dir, "pyram_incoherent_sum.png"), dpi=200)
+    # # -------------------------------------------
+    # # Impulse Response
+    # # -------------------------------------------
+    # plt.figure(figsize=(12,4))
+    # plt.plot(time, np.abs(sig))
+    # plt.xlabel("Time (s)")
+    # plt.ylabel("Relative Pressure")
+    # plt.title("Received Signal (Convolved with ARMS Source)")
+    # plt.savefig(os.path.join(save_file_dir, "pyram_time_response_10s.png"), dpi=200,
+    #          bbox_inches='tight',
+    #          pad_inches=0)  
     # plt.show()
+
+
+    
